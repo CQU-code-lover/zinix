@@ -1,6 +1,7 @@
 import argparse
 import os
-DEBUG = True
+# DEBUG = True
+DEBUG = False
 # static values
 OBJDUMP = "rust-objdump --arch-name=riscv64"
 OBJCOPY = "rust-objcopy --binary-architecture=riscv64"
@@ -15,6 +16,7 @@ def mode_update():
     global DISASM_TMP
     KERNEL_ELF = "target/"+TARGET+"/"+MODE+"/kernel"
     KERNEL_BIN = KERNEL_ELF+".bin"
+    print("The Build Mode Is Change To:"+MODE)
 
 def is_debug():
     return MODE=="debug"
@@ -61,6 +63,7 @@ def common_clean(self):
     os.system("rm "+"last-"+self.name)
     os.system("rm linker.ld")
     os.system("rm dump.txt")
+    os.system("rm head.txt")
 
 # qemu function
 def qemu_clean(self):
@@ -78,18 +81,20 @@ def qemu_pre_build(self):
         if last_flag_file != "":
             platforms[last_flag_file].clean()
         os.system("touch "+flag_file)
-        os.system("cp platform/"+self.name+"/linker.ld .")
+
+    os.system("cp platform/"+self.name+"/linker.ld .")
 
 def qemu_build(self):
     print("Build Platform:"+self.name)
     self.pre_build(self)
     if is_debug():
-        os.system("cargo build")
+        return os.system("cargo build")==0
     else:
-        os.system("cargo build --release")
+        return os.system("cargo build --release")==0
 
 def qemu_after_build(self):
-    self.build(self)
+    if not self.build(self):
+        return False
     cmd = OBJCOPY+" "+KERNEL_ELF+" --strip-all -O binary " +KERNEL_BIN
     if DEBUG:
         print(cmd)
@@ -99,15 +104,25 @@ def qemu_after_build(self):
         print(cmd)
     os.system(cmd)
 
-def qemu_run(self):
-    self.after_build(self)
+    cmd = OBJDUMP+" -h "+KERNEL_ELF+">head.txt"
+    if DEBUG:
+        print(cmd)
+    os.system(cmd)
+
+    return True
+
+def qemu_run(self,debug):
+    if not self.after_build(self):
+        exit(-1)
     print("build all OK!")
     print("start run...")
     cmd = "qemu-system-riscv64 \
-     -machine virt \
+               -machine virt \
               -nographic \
               -bios ../bootloader/rustsbi-qemu.bin \
-              -device loader,file="+KERNEL_BIN+",addr=0x80200000"
+              -device loader,file="+KERNEL_BIN+",addr=0x80200000 "
+    if debug:
+        cmd += "-S -s"
     os.system(cmd)
 
 # first of all: check and update environment
@@ -118,7 +133,7 @@ q = Platform("qemu",pre_build=qemu_pre_build,build=qemu_build,
 
 parser = argparse.ArgumentParser()
 run_build_group = parser.add_mutually_exclusive_group()
-parser.add_argument("-p","--platform",help="use --show-platforms option to show platform list , default "
+parser.add_argument("-p","--platform",help="use --show-platforms option to show support platform list , default "
                                            "platform is qemu",default="qemu")
 parser.add_argument("--release",help="build release version",action="store_true")
 run_build_group.add_argument("-b","--build",help="build project",action="store_true")
@@ -126,7 +141,8 @@ run_build_group.add_argument("-r","--run",help="run project",action="store_true"
 run_build_group.add_argument("--graph",help="run project with graph",action="store_true")
 run_build_group.add_argument("-c","--clean",help="clean project",action="store_true")
 run_build_group.add_argument("-v","--version",help="show project version",action="store_true")
-run_build_group.add_argument("--show-platforms",help="show target list",action="store_true")
+run_build_group.add_argument("-d","--debug",help="run with debug mode",action="store_true")
+run_build_group.add_argument("--show-platforms",help="show support platform list",action="store_true")
 
 args = parser.parse_args()
 platform = args.platform
@@ -147,7 +163,7 @@ if args.version:
 
 if args.run:
     p = platforms[platform]
-    p.run(p)
+    p.run(p,False)
 
 if args.clean:
     p = platforms[platform]
@@ -155,4 +171,8 @@ if args.clean:
 
 if args.build:
     p = platforms[platform]
-    p.build(p)
+    p.after_build(p)
+
+if args.debug:
+    p = platforms[platform]
+    p.run(p,True)
