@@ -1,20 +1,22 @@
-OUTPUT_ARCH(riscv)
+OUTPUT_ARCH(riscv64)
 ENTRY(_start)
-BASE_ADDRESS = 0x80200000;
 
+BASE_ADDR = 0xffffffd880200000;
 SECTIONS
 {
-    . = BASE_ADDRESS;
-    skernel = .;
+    . = BASE_ADDR;
 
     stext = .;
-    .text : {
-        *(.text.entry)
-        *(.text .text.*)
+    .text.init : {
+        *(.text.init)
     }
 
-    . = ALIGN(4K);
+    .text : {
+        *(.text .text.*)
+    }
     etext = .;
+
+    . = ALIGN(4K);
     srodata = .;
     .rodata : {
         *(.rodata .rodata.*)

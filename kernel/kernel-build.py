@@ -5,6 +5,8 @@ DEBUG = False
 # static values
 OBJDUMP = "rust-objdump --arch-name=riscv64"
 OBJCOPY = "rust-objcopy --binary-architecture=riscv64"
+NM = "rust-nm "
+READELF = "readelf "
 TARGET = "riscv64gc-unknown-none-elf"
 MODE = "debug" #debug/release
 KERNEL_ELF = "target/"+TARGET+"/"+MODE+"/kernel"
@@ -88,6 +90,7 @@ def qemu_build(self):
     print("Build Platform:"+self.name)
     self.pre_build(self)
     if is_debug():
+        # return os.system("cargo build --target targets/riscv64.json")==0
         return os.system("cargo build")==0
     else:
         return os.system("cargo build --release")==0
@@ -104,7 +107,18 @@ def qemu_after_build(self):
         print(cmd)
     os.system(cmd)
 
-    cmd = OBJDUMP+" -h "+KERNEL_ELF+">head.txt"
+    #cmd = OBJDUMP+" -h "+KERNEL_ELF+">head.txt"
+    cmd = "objdump -h "+KERNEL_ELF+">head.txt"
+    if DEBUG:
+        print(cmd)
+    os.system(cmd)
+
+    cmd = NM+" "+KERNEL_ELF+">nm.txt"
+    if DEBUG:
+        print(cmd)
+    os.system(cmd)
+
+    cmd = READELF+" --segments "+KERNEL_ELF+">>head.txt"
     if DEBUG:
         print(cmd)
     os.system(cmd)
@@ -120,9 +134,9 @@ def qemu_run(self,debug):
                -machine virt \
               -nographic \
               -bios ../bootloader/rustsbi-qemu.bin \
-              -device loader,file="+KERNEL_BIN+",addr=0x80200000 "
+              -device loader,addr=0x80200000,file="+KERNEL_BIN+" "
     if debug:
-        cmd += "-S -s"
+        cmd += " -S -s"
     os.system(cmd)
 
 # first of all: check and update environment

@@ -17,9 +17,13 @@ mod sbi;
 mod console;
 mod trap;
 mod timer;
+mod consts;
 
 
 global_asm!(include_str!("entry.asm"));
+
+#[link_section=".text.entry"]
+static A:char = 'A';
 
 fn clear_bss() {
     extern "C" {
@@ -35,19 +39,17 @@ fn clear_bss() {
 }
 
 #[no_mangle]
-fn start_kernel() {
+fn start_kernel(a0:usize,a1:usize) {
+    println!("Hello World!");
+    println!("{:x}",a1);
     clear_bss();
     extern "C" { fn trap_entry(); }
     unsafe {
         stvec::write(trap_entry as usize, TrapMode::Direct);
     }
-    unsafe {sstatus::set_sie();}
-    unsafe {sie::set_stimer();}
-    let r = sie::read().bits();
-    println!("{:x}",r);
+
     println!("{:x}",stvec::read().bits());
     //set_next_trigger();
-    let m = k210_pac::Peripherals::take().unwrap();
     loop {
 
     }
