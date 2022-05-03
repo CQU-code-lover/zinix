@@ -5,7 +5,7 @@ BASE_ADDR = 0xffffffd880200000;
 SECTIONS
 {
     . = BASE_ADDR;
-
+    skernel = .;
     stext = .;
     .text.init : {
         *(.text.init)
