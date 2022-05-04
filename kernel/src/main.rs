@@ -11,14 +11,15 @@
 #[macro_use]
 extern crate lazy_static;
 extern crate alloc;
-
+#[macro_use]
+extern crate bitflags;
 
 use core::ops::Generator;
 use log::{error, info, LevelFilter, warn};
 use riscv::register::{sie, stvec, sstatus};
 use riscv::register::mtvec::TrapMode;
 use crate::logger::early_logger_init;
-use crate::mm::{mm_init, UnitTest};
+use crate::mm::{mm_init, MmUnitTest};
 use crate::sync::SpinLock;
 use crate::timer::set_next_trigger;
 use buddy_system_allocator::LockedHeap;
@@ -34,6 +35,7 @@ mod consts;
 mod logger;
 mod sync;
 mod mm;
+mod utils;
 
 global_asm!(include_str!("entry.asm"));
 
@@ -56,7 +58,7 @@ fn start_kernel(cpu:usize,devtree:usize) {
     println!("{:x}",stvec::read().bits());
     //set_next_trigger();
     mm_init();
-    UnitTest();
+    MmUnitTest();
     loop {
 
     }
