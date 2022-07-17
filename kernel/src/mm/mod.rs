@@ -1,15 +1,21 @@
+mod addr;
+mod page;
+pub(crate) mod buddy;
+
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
-use core::intrinsics::add_with_overflow;
 use core::ptr::{addr_of, NonNull, null};
 use bitmaps::Bitmap;
 use log::{error, info};
 use crate::{consts, SpinLock};
 use crate::consts::{DIRECT_MAP_START, PAGE_OFFSET, PAGE_SIZE};
 use buddy_system_allocator::LockedHeap;
+use riscv::register::fcsr::Flags;
 use crate::sync::SpinLockGuard;
+use crate::utils::{addr_get_ppn2, addr_get_ppn1, addr_get_ppn0, get_usize_by_addr, set_usize_by_addr};
 
 const k210_mem_mb:u32 = 6;
 const qemu_mem_mb:u32 = 6;
@@ -33,6 +39,7 @@ pub fn alloc_error_handler(layout: core::alloc::Layout)->!{
 extern "C" {
     fn ekernel();
     fn skernel();
+    fn boot_pagetable();
 }
 
 pub struct PF_Allocator {
@@ -111,6 +118,10 @@ impl PF_Allocator {
     }
 }
 
+lazy_static!{
+    static ref KERNEL_PAGETABLE:Arc<SpinLock<PageTable>> = Arc::new(SpinLock::new(create_kernel_pagetable()));
+}
+
 pub fn mm_init(){
     let sk = skernel as usize;
     let ek = ekernel as usize;
@@ -129,23 +140,107 @@ pub fn MmUnitTest(){
     info!("a:{:x}",a);
 }
 
+#[derive(Clone)]
 pub struct PageTable{
     tables : Vec<usize>
 }
 
+const WalkRetLevelRoot:usize = 0;
+const WalkRetLevelMiddle:usize = 1;
+const WalkRetLevelLeaf:usize = 2;
+
+pub struct WalkRet{
+    level:usize,
+    pte_addr:usize,
+}
+
+
 impl PageTable {
+    // alloc时默认不使用大页
+    fn _walk_common(&mut self, vaddr:usize, alloc:bool)->Option<WalkRet>{
+        let mut pg_addr = self._get_root_page();
+        let ppn_arr = [addr_get_ppn2(vaddr),addr_get_ppn1(vaddr),addr_get_ppn0(vaddr)];
+        for i in 0..3{
+            let index = ppn_arr[i];
+            let entry_addr = pg_addr+index*8;
+            let entry =unsafe {get_usize_by_addr(entry_addr)};
+            let mut pte = PTE::from(entry);
+            // 如果是leaf，不管pte是否valid都能返回
+            if pte.is_leaf(){
+                return Some(WalkRet{
+                    level: i,
+                    pte_addr: entry_addr
+                });
+            }
+
+            if pte.vaild() {
+                pg_addr = pte.get_point_paddr();
+                continue;
+            }
+            else {
+                // not get next
+                if alloc {
+                    pte.set_ppn(PF_ALLOCATOR.lock().unwrap().get_pf_cleared());
+                    //set RWX
+                    //此时一定是非叶子页表
+                    pte.clear_flags(PTEFlags::R.bits|PTEFlags::W.bits|PTEFlags::X.bits);
+                    let new_pte_val = pte.into();
+                    // write back pte value
+                    unsafe {set_usize_by_addr(entry_addr,new_pte_val)};
+                }
+                else {
+                    return None;
+                }
+            }
+        }
+        // bug：三级页表项出现RWX全0情况
+        error!("Walk Fault!");
+        return None;
+    }
+
     // walk pagetable but not alloc new page.
-    fn walk(vaddr:usize)->Option<usize>{
-        Some(1)
+    // return leaves pagetable`s PTE addr...
+    // so we can mapping it...
+    pub fn walk(&mut self, vaddr:usize)->Option<WalkRet>{
+        return self._walk_common(vaddr,false);
     }
     // walk pagetable and alloc new page when don`t have valid page.
-    fn walk_alloc(){
+    pub fn walk_alloc(&mut self, vaddr:usize)->WalkRet{
+        // alloc是不会返回None，否则会panic
+        let r= self._walk_common(vaddr,true);
+        match r {
+            None=>{
+                error!("bug");
+                WalkRet{
+                    level: 0,
+                    pte_addr: 0
+                }
+            },
+            Some(ret)=> ret
+        }
+    }
+    pub fn use_addr(&mut self,vaddr:usize,flags:u8){
+        let r = self.walk_alloc(vaddr);
+        match r.level {
+            WalkRetLevelLeaf => {
+                let pte_val =unsafe {get_usize_by_addr(vaddr)};
+                let mut pte = PTE::from(pte_val);
+                let pf = PF_ALLOCATOR.lock().unwrap().get_pf_cleared();
+                self.tables.push(pf);
+                pte.set_ppn(pf);
+                pte.set_flags(flags);
+                let new_pte_val = pte.into();
+                unsafe {set_usize_by_addr(vaddr,new_pte_val)};
+            },
+            _=>{
 
+            }
+        }
     }
 }
 
 impl PageTable {
-    fn getRootPage(& self)->usize{
+    fn _get_root_page(& self) ->usize{
         self.tables[0]
     }
 }
@@ -158,8 +253,6 @@ impl Default for PageTable {
         }
     }
 }
-
-
 
 bitflags! {
     pub struct PTEFlags: u8 {
@@ -185,7 +278,7 @@ struct PTE{
 impl Into<usize> for PTE {
     fn into(self) -> usize {
         let v:usize = 0;
-        v|self.flags|(self.pnn0<<10)|(self.pnn1<<19)|(self.pnn2<<27)
+        v|self.flags as usize|((self.pnn0<<10) as usize)|((self.pnn1<<19) as usize)|((self.pnn2<<28) as usize)
     }
 }
 
@@ -223,12 +316,31 @@ impl PTE {
         return self.flags &flag_mask!=0;
     }
     fn vaild(&self)->bool{
-        return self._get_bits(PTEFlags.V);
+        return self._get_bits(PTEFlags::V.bits);
     }
-    fn set_pnn(&mut self,paddr :usize){
+    fn is_leaf(&self)->bool{
+        return !((self._get_bits(PTEFlags::R.bits)==false)&
+            (self._get_bits(PTEFlags::W.bits)==false)&
+            (self._get_bits(PTEFlags::X.bits)==false));
+    }
+    fn is_not_leaf(&self)->bool{
+        return !self.is_leaf();
+    }
+    fn set_ppn(&mut self,paddr :usize){
         let np = paddr>>10;
         self.pnn0 = (np&0x1FF) as u16;
         self.pnn1 = ((np>>9)&0x1FF) as u16;
         self.pnn2 = ((np>>18)&0x1FF) as u16;
     }
+    fn get_point_paddr(& self)->usize{
+        return ((self.pnn0 as usize)|((self.pnn1<<9) as usize)|((self.pnn2<<18) as usize))<<12;
+    }
+}
+
+fn create_kernel_pagetable()->PageTable{
+    let kernel_pagetable_root = boot_pagetable as usize;
+    let kp = PageTable{
+        tables: vec![kernel_pagetable_root]
+    };
+    return kp;
 }

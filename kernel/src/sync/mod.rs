@@ -1,3 +1,5 @@
+pub mod cpu_local;
+
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};

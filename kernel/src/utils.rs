@@ -20,3 +20,25 @@ pub fn vaddr2paddr(addr:usize)->usize{
 pub fn paddr2vaddr(addr:usize)->usize{
     return addr+DIRECT_MAP_START;
 }
+
+pub fn addr_get_ppn0(vaddr:usize)->usize{
+    (vaddr>>12)&0x1FF
+}
+
+pub fn addr_get_ppn1(vaddr:usize)->usize{
+    (vaddr>>21)&0x1FF
+}
+
+pub fn addr_get_ppn2(vaddr:usize)->usize{
+    (vaddr>>30)&0x1FF
+}
+
+pub unsafe  fn get_usize_by_addr(vaddr:usize)->usize{
+    let ptr = vaddr as *mut usize;
+    ptr.read_volatile()
+}
+
+pub unsafe fn set_usize_by_addr(vaddr:usize,val:usize){
+    let ptr = vaddr as *mut usize;
+    ptr.write_volatile(val);
+}

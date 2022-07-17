@@ -1,6 +1,8 @@
 use crate::println;
+use crate::sbi::shutdown;
 global_asm!(include_str!("trap_asm.s"));
 
+#[repr(C)]
 struct TrapFrame{
     sepc:usize,   //sepc
     x1:usize,   //ra
@@ -41,10 +43,12 @@ struct TrapFrame{
 
 #[no_mangle]
 fn irq_handler(trap_frame:&mut TrapFrame){
-    println!("{:X}",trap_frame.scause);
+    println!("irq shutdown by scause:{:X}",trap_frame.scause);
+    shutdown();
 }
 
 #[no_mangle]
 fn exc_handler(trap_frame:&mut TrapFrame){
-    println!("{:X}",trap_frame.scause);
+    println!("exc shutdown by scause:{:X}",trap_frame.scause);
+    shutdown();
 }

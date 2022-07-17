@@ -147,6 +147,7 @@ boot_stack_top:
 # 0xffffffd880000000 -> 0x80000000
     .section .data
     .align 12
+    .global boot_pagetable
 boot_pagetable:
     .quad 0
     .quad 0

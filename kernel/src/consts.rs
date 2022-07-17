@@ -14,3 +14,9 @@ pub static DIRECT_MAP_END:usize = 0xfffffff700000000;
 
 pub const PAGE_SIZE:usize = 4096;
 pub const PAGE_OFFSET:usize = 12;
+
+pub const CPUS:usize = 2;
+
+// PF allocator
+pub const MAX_ORDER:usize = 11;
+pub const MAX_ORDER_NR_PAGES:usize = 1<<(MAX_ORDER-1);

@@ -11,6 +11,7 @@
 #[macro_use]
 extern crate lazy_static;
 extern crate alloc;
+
 #[macro_use]
 extern crate bitflags;
 
@@ -23,6 +24,10 @@ use crate::mm::{mm_init, MmUnitTest};
 use crate::sync::SpinLock;
 use crate::timer::set_next_trigger;
 use buddy_system_allocator::LockedHeap;
+use riscv::register::sstatus::Sstatus;
+use crate::mm::buddy::buddy_test;
+use crate::sync::cpu_local::{get_core_id, set_core_id};
+use crate::task::task_test;
 
 #[macro_use]
 
@@ -36,14 +41,19 @@ mod logger;
 mod sync;
 mod mm;
 mod utils;
+mod task;
 
 global_asm!(include_str!("entry.asm"));
 
 #[no_mangle]
-fn start_kernel(cpu:usize,devtree:usize) {
+fn start_kernel(cpu:usize,dev_tree:usize) {
+    set_core_id(cpu);
     extern "C" { fn trap_entry(); }
     unsafe {
         stvec::write(trap_entry as usize, TrapMode::Direct);
+        let s = sstatus::read();
+        sstatus::set_sie();
+        sie::set_stimer();
     }
     let lock = SpinLock::new(1);
     {
@@ -52,15 +62,24 @@ fn start_kernel(cpu:usize,devtree:usize) {
     let grd2 = lock.lock().unwrap();
     early_logger_init();
     log::set_max_level(LevelFilter::Trace);
-    info!("Start CPU {}",cpu);
     info!("info");
     warn!("warn");
     println!("{:x}",stvec::read().bits());
-    //set_next_trigger();
+    println!("cpu {:?}",get_core_id());
+    // set_next_trigger();
     mm_init();
     MmUnitTest();
+    let p_fn = test as *const ();
+    let p:fn(usize,usize) = unsafe { core::mem::transmute(p_fn) };
+    println!("function:{:x}",p_fn as usize);
+    buddy_test();
+    task_test();
+    println!("end task test");
     loop {
-
     }
     panic!("kernel exit!");
+}
+
+fn test(){
+    sbi::shutdown();
 }
