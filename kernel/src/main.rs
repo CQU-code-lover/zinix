@@ -7,6 +7,7 @@
 #![feature(trace_macros)]
 #![feature(alloc_error_handler)]
 #![feature(linked_list_remove)]
+#![feature(default_free_fn)]
 //trace_macros!(true);
 
 #[macro_use]

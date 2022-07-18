@@ -24,7 +24,7 @@ pub struct BuddyAllocator {
     first_pfn : PFN
 }
 
-fn order2pages(order:usize)->usize{
+pub fn order2pages(order:usize)->usize{
     return if order < MAX_ORDER {
         1 << order
     } else {
@@ -144,6 +144,12 @@ impl BuddyAllocator{
             }
         }
         return Err(-1);
+    }
+    pub fn alloc_pages(order:usize)->Option<Addr>{
+        None
+    }
+    pub fn free_pages(addr:Addr, order:usize){
+
     }
 }
 
