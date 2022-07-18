@@ -1,6 +1,7 @@
 mod addr;
 mod page;
 pub(crate) mod buddy;
+mod bitmap;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;

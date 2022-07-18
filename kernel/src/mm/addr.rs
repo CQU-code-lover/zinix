@@ -74,7 +74,13 @@ impl Addr {
         Addr::from((self.0/PAGE_SIZE)*PAGE_SIZE)
     }
     pub fn ceil(&self)->Addr{
-        Addr::from(self.floor().0 + PAGE_SIZE)
+        Addr::from(
+            if self.0%PAGE_SIZE == 0{
+                self.floor().0
+            } else {
+                self.floor().0 + PAGE_SIZE
+            }
+        )
     }
     pub fn get_pg_cnt(&self)->usize{
         return self.0/PAGE_SIZE;

@@ -6,6 +6,7 @@
 #![feature(generator_trait)]
 #![feature(trace_macros)]
 #![feature(alloc_error_handler)]
+#![feature(linked_list_remove)]
 //trace_macros!(true);
 
 #[macro_use]
