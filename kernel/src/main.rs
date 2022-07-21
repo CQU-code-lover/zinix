@@ -8,6 +8,7 @@
 #![feature(alloc_error_handler)]
 #![feature(linked_list_remove)]
 #![feature(default_free_fn)]
+#![feature(linked_list_cursors)]
 //trace_macros!(true);
 
 #[macro_use]
@@ -22,7 +23,7 @@ use log::{error, info, LevelFilter, warn};
 use riscv::register::{sie, stvec, sstatus};
 use riscv::register::mtvec::TrapMode;
 use crate::logger::early_logger_init;
-use crate::mm::{mm_init, MmUnitTest};
+use crate::mm::mm_init;
 use crate::sync::SpinLock;
 use crate::timer::set_next_trigger;
 use buddy_system_allocator::LockedHeap;
@@ -70,7 +71,6 @@ fn start_kernel(cpu:usize,dev_tree:usize) {
     println!("cpu {:?}",get_core_id());
     // set_next_trigger();
     mm_init();
-    MmUnitTest();
     let p_fn = test as *const ();
     let p:fn(usize,usize) = unsafe { core::mem::transmute(p_fn) };
     println!("function:{:x}",p_fn as usize);

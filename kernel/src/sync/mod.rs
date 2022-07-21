@@ -8,6 +8,7 @@ use log::error;
 
 pub type LockResult<Guard> = Result<Guard, u32>;
 
+
 pub struct SpinLock<T:?Sized> {
     inner:AtomicBool,
     data:UnsafeCell<T>

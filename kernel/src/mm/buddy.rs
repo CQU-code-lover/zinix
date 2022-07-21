@@ -8,7 +8,7 @@ use core::ops::Add;
 use log::{error, info, log_enabled, set_max_level, warn};
 use riscv::interrupt::free;
 use crate::consts::{MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
-use crate::{cpu_local, println};
+use crate::{cpu_local, println, SpinLock};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::bitmap::{Bitmap, bitmap_test};
 use crate::mm::page::Page;
@@ -32,13 +32,16 @@ pub fn order2pages(order:usize)->usize{
     }
 }
 
-impl BuddyAllocator{
-    pub fn default()->BuddyAllocator {
+impl Default for BuddyAllocator {
+    fn default()->Self {
         return BuddyAllocator{
             free_areas: Vec::new(),
             first_pfn : PFN::from(0)
         };
     }
+}
+
+impl BuddyAllocator{
     pub fn free_pages_cnt(&self)-> usize{
         let mut pgs_cnt = 0;
         for i in 0..MAX_ORDER {
@@ -298,5 +301,6 @@ pub fn buddy_test(){
     let m = b.alloc_area(0);
     b.free_area(m.unwrap(), 0);
     info!("\n{:?}",b);
+    // page_test();
     shutdown();
 }

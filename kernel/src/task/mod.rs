@@ -7,7 +7,7 @@ use core::cell::RefCell;
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use log::error;
-use crate::mm::{PageTable, PF_Allocator};
+use crate::mm::pagetable::PageTable;
 use crate::{println, SpinLock};
 use crate::sbi::shutdown;
 

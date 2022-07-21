@@ -1,12 +1,18 @@
 use core::fmt;
 use core::fmt::{Debug, Formatter};
-use core::ops::{Add, Sub};
+use core::ops::{Add, AddAssign, Sub, SubAssign};
 use core::ptr::addr_of;
-use crate::consts::PAGE_SIZE;
+use crate::consts::{PAGE_OFFSET, PAGE_SIZE};
 
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Addr(pub usize);
+
+impl Default for Addr {
+    fn default() -> Self {
+        Addr(0)
+    }
+}
 
 // PFN
 #[repr(C)]
@@ -32,6 +38,18 @@ impl Sub for Addr{
 
     fn sub(self, rhs: Self) -> Self::Output {
         return  Addr(self.0-rhs.0);
+    }
+}
+
+impl AddAssign for Addr {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0
+    }
+}
+
+impl SubAssign for Addr {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0
     }
 }
 
@@ -95,5 +113,8 @@ impl PFN {
     pub fn step_one(&mut self)->Self{
         self.0+=1;
         *self
+    }
+    pub fn get_addr_usize(&self)->usize{
+        self.0<<PAGE_OFFSET
     }
 }
