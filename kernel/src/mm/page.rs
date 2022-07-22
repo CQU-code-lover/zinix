@@ -8,12 +8,14 @@ use core::borrow::BorrowMut;
 use core::cell::{Ref, RefCell};
 use core::default::default;
 use core::pin::Pin;
+
 use log::set_max_level;
-use crate::mm::addr::{Addr, PFN};
-use crate::mm::buddy::order2pages;
+
 use crate::{println, SpinLock};
 use crate::consts::PAGE_SIZE;
 use crate::mm::_insert_area_for_page_drop;
+use crate::mm::addr::{Addr, PFN};
+use crate::mm::buddy::order2pages;
 use crate::sync::SpinLockGuard;
 
 pub struct PagesManager{
@@ -128,6 +130,24 @@ pub struct PageMutInner {
     friends:LinkedList<Arc<Page>>,
     leader:Weak<Page>,
     order:usize
+}
+
+pub struct PageWriter<'a>(usize, SpinLockGuard<'a,PageMutInner>);
+pub struct PageReader<'a>(usize, SpinLockGuard<'a,PageMutInner>);
+
+impl<'a> PageWriter<'a> {
+    pub fn read_volatile<T:Sized>(&self,off:usize)->T{
+        unsafe { ((self.0 + off) as *const T).read_volatile() }
+    }
+    pub fn write_volatile<T:Sized>(&self,off:usize,val:T){
+        unsafe { ((self.0 + off) as *mut T).write_volatile(val) }
+    }
+}
+
+impl<'a,> PageReader<'a> {
+    pub fn read_volatile<T:Sized>(&self,off:usize)->T{
+        unsafe { ((self.0 + off) as *const T).read_volatile() }
+    }
 }
 
 impl PageMutInner {
@@ -255,6 +275,31 @@ impl Page {
     // pub fn iter(&self)->PageInterator{
     //     PageInterator::new(self)
     // }
+
+    // the PageReader will hold PageInner lock
+    pub fn get_page_writer(&self) -> PageWriter {
+        PageWriter(self.pfn.get_addr_usize(), self.get_inner_guard())
+    }
+    pub fn get_page_reader(&self) -> PageReader {
+        PageReader(self.pfn.get_addr_usize(), self.get_inner_guard())
+    }
+    pub fn back(&self)->Arc<Page>{
+        if !self.is_leader(){
+            panic!("page get back fail");
+        }
+        let g = self.get_inner_guard();
+        if g.friends.is_empty(){
+            self.get_leader().clone()
+        } else {
+            g.friends.back().unwrap().clone()
+        }
+    }
+    pub fn front(&self)->Arc<Page>{
+        if !self.is_leader(){
+            panic!("page get front fail");
+        }
+        self.get_leader().clone()
+    }
 }
 
 impl Drop for Page {

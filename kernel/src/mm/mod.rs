@@ -1,31 +1,34 @@
-mod addr;
-mod page;
-pub(crate) mod buddy;
-mod bitmap;
-pub(crate) mod pagetable;
-mod vma;
-mod mm;
-
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::ptr::{addr_of, NonNull, null};
+
 use bitmaps::Bitmap;
+use buddy_system_allocator::LockedHeap;
 use log::{error, info};
+use riscv::register::fcsr::Flags;
+
+use buddy::BuddyAllocator;
+use page::PagesManager;
+use pagetable::create_kernel_pagetable;
+use pagetable::PageTable;
+
 use crate::{consts, SpinLock};
 use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
-use pagetable::create_kernel_pagetable;
-use page::PagesManager;
-use pagetable::PageTable;
-use buddy::BuddyAllocator;
-use buddy_system_allocator::LockedHeap;
-use riscv::register::fcsr::Flags;
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::page::Page;
 use crate::sync::SpinLockGuard;
-use crate::utils::{addr_get_ppn2, addr_get_ppn1, addr_get_ppn0, get_usize_by_addr, set_usize_by_addr};
+use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
+
+mod addr;
+pub(crate) mod page;
+pub(crate) mod buddy;
+mod bitmap;
+pub(crate) mod pagetable;
+mod vma;
+pub(crate) mod mm;
 
 const k210_mem_mb:u32 = 6;
 const qemu_mem_mb:u32 = 6;

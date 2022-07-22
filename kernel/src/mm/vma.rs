@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+
 use crate::mm::addr::Addr;
 use crate::mm::page::Page;
 
@@ -42,6 +43,12 @@ impl VMA {
             pages: vec![],
             phy_pgs_cnt:0
         })
+    }
+    pub fn get_start_addr(&self)->Addr{
+        self.start_addr
+    }
+    pub fn get_end_addr(&self)->Addr{
+        self.end_addr
     }
     pub fn in_vma(&self, vaddr: Addr) ->bool{
         vaddr >=self.start_addr&& vaddr <self.end_addr

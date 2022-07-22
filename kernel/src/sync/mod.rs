@@ -5,6 +5,7 @@ use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::error;
+use crate::asm::{disable_irq, enable_irq};
 
 pub type LockResult<Guard> = Result<Guard, u32>;
 
@@ -19,7 +20,9 @@ unsafe impl<T: ?Sized+Send> Send for SpinLock<T>{}
 unsafe impl<T: ?Sized+Send> Sync for SpinLock<T>{}
 
 pub struct SpinLockGuard<'a,T:?Sized> {
-    spinlock:&'a SpinLock<T>
+    spinlock:&'a SpinLock<T>,
+    irq_lock : bool,
+    irq_state: usize
 }
 
 impl <T> SpinLock<T> {
@@ -48,25 +51,36 @@ impl<T:?Sized> SpinLock<T> {
 
     pub fn lock(&self)->LockResult<SpinLockGuard<T>>{
         self.try_lock();
-        Ok(SpinLockGuard::new(self))
+        Ok(SpinLockGuard::new(self,false,0))
     }
 
-    pub fn unlock(&self){
+    pub fn lock_irq(&self)->LockResult<SpinLockGuard<T>>{
+        let irq_state = disable_irq();
+        self.try_lock();
+        Ok(SpinLockGuard::new(self,true,irq_state))
+    }
+
+    fn _unlock(&self){
         self.inner.store(false,Ordering::Release);
     }
 }
 
 impl<'a,T:?Sized> SpinLockGuard<'a,T> {
-    fn new(spinlock:&'a SpinLock<T>)->Self{
+    fn new(spinlock:&'a SpinLock<T>,irq_lock:bool,irq_state:usize)->Self{
         SpinLockGuard{
-            spinlock
+            spinlock,
+            irq_lock,
+            irq_state
         }
     }
 }
 
 impl<T:?Sized> Drop for SpinLockGuard<'_,T>{
     fn drop(&mut self) {
-        self.spinlock.unlock();
+        self.spinlock._unlock();
+        if self.irq_lock{
+            enable_irq(self.irq_state)
+        }
     }
 }
 

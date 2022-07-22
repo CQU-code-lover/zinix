@@ -5,10 +5,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter, write};
 use core::ops::Add;
+
 use log::{error, info, log_enabled, set_max_level, warn};
 use riscv::interrupt::free;
-use crate::consts::{MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
+
 use crate::{cpu_local, println, SpinLock};
+use crate::consts::{MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::bitmap::{Bitmap, bitmap_test};
 use crate::mm::page::Page;

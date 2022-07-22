@@ -9,28 +9,31 @@
 #![feature(linked_list_remove)]
 #![feature(default_free_fn)]
 #![feature(linked_list_cursors)]
+#![feature(asm)]
+#![allow(unused_imports)]
 //trace_macros!(true);
 
-#[macro_use]
-extern crate lazy_static;
 extern crate alloc;
-
 #[macro_use]
 extern crate bitflags;
+#[macro_use]
+extern crate lazy_static;
 
 use core::ops::Generator;
+
+use buddy_system_allocator::LockedHeap;
 use log::{error, info, LevelFilter, warn};
-use riscv::register::{sie, stvec, sstatus};
+use riscv::register::{sie, sstatus, stvec};
+use riscv::register::mie::read;
 use riscv::register::mtvec::TrapMode;
+use riscv::register::sstatus::Sstatus;
+
 use crate::logger::early_logger_init;
+use crate::mm::buddy::buddy_test;
 use crate::mm::mm_init;
+use crate::sync::cpu_local::{get_core_id, set_core_id};
 use crate::sync::SpinLock;
 use crate::timer::set_next_trigger;
-use buddy_system_allocator::LockedHeap;
-use riscv::register::sstatus::Sstatus;
-use crate::mm::buddy::buddy_test;
-use crate::sync::cpu_local::{get_core_id, set_core_id};
-use crate::task::task_test;
 
 #[macro_use]
 
@@ -45,6 +48,7 @@ mod sync;
 mod mm;
 mod utils;
 mod task;
+mod asm;
 
 global_asm!(include_str!("entry.asm"));
 
@@ -75,7 +79,7 @@ fn start_kernel(cpu:usize,dev_tree:usize) {
     let p:fn(usize,usize) = unsafe { core::mem::transmute(p_fn) };
     println!("function:{:x}",p_fn as usize);
     buddy_test();
-    task_test();
+    // task_test();
     println!("end task test");
     loop {
     }

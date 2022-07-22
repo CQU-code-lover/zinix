@@ -3,11 +3,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::cmp::Ordering;
+
 use log::error;
 use riscv::asm::sfence_vma_all;
+
 use crate::consts::PAGE_SIZE;
+use crate::mm::{alloc_pages, KERNEL_PAGETABLE};
 use crate::mm::addr::{Addr, PFN};
-use crate::mm::alloc_pages;
 use crate::mm::buddy::order2pages;
 use crate::mm::page::Page;
 use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
@@ -33,6 +35,18 @@ pub struct WalkRet{
 }
 
 impl PageTable {
+    pub fn new_user()->Self{
+        let mut p = PageTable::default();
+        let root_addr = KERNEL_PAGETABLE.lock().unwrap()._get_root_page_addr();
+        for i in (0..PAGE_SIZE).filter(|x|{x%8==0}) {
+            unsafe {
+                ((p._get_root_page_addr() + i) as *mut u64).write_volatile(
+                    ((root_addr + i) as *const u64).read_volatile()
+                );
+            }
+        }
+        p
+    }
     fn _insert_new_pages(&mut self,pgs : Arc<Page>) {
         self.private_pgs.push(pgs)
     }

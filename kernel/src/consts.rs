@@ -20,3 +20,8 @@ pub const CPUS:usize = 2;
 // PF allocator
 pub const MAX_ORDER:usize = 11;
 pub const MAX_ORDER_NR_PAGES:usize = 1<<(MAX_ORDER-1);
+
+// boot stack
+pub const BOOT_STACK_NR_PAGES:usize = 4;
+pub const KERNEL_STACK_SIZE_ORDER:usize = 2;
+pub const STACK_MAGIC:u64 = 0xABCD1122ABCD1122;
