@@ -42,3 +42,9 @@ pub unsafe fn set_usize_by_addr(vaddr:usize,val:usize){
     let ptr = vaddr as *mut usize;
     ptr.write_volatile(val);
 }
+
+pub unsafe fn memcpy(dest:usize,src: usize,len:usize){
+    for i in 0..len{
+        *((dest+i) as *mut u8) = *((dest+i) as *mut u8);
+    }
+}

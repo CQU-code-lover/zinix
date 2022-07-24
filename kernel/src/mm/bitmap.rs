@@ -4,7 +4,7 @@ use core::fmt::{Debug, Formatter};
 
 use log::info;
 
-use crate::println;
+use crate::{info_sync, println};
 
 pub struct Bitmap {
     inner : Vec<u64>,
@@ -142,6 +142,6 @@ pub fn bitmap_test(){
     assert_eq!(j,false);
     assert_eq!(k,true);
     assert_eq!(m,false);
-    info!("\n{:?}",b);
-    info!("bitmap test OK!");
+    info_sync!("\n{:?}",b);
+    info_sync!("bitmap test OK!");
 }

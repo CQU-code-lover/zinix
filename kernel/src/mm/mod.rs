@@ -15,8 +15,8 @@ use page::PagesManager;
 use pagetable::create_kernel_pagetable;
 use pagetable::PageTable;
 
-use crate::{consts, SpinLock};
-use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
+use crate::{consts, info_sync, SpinLock};
+use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_START};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::page::Page;
 use crate::sync::SpinLockGuard;
@@ -76,9 +76,9 @@ pub fn mm_init(){
     unsafe {
         HEAP_ALLOCATOR.lock().init(ek,PAGE_SIZE*HeapPages);
     }
-    info!("Heap Allocator Init OK!");
+    info_sync!("Heap Allocator Init OK!");
     // init PAGE FRAME ALLOCATOR
-    let emem = (qemu_mem_mb as usize)*1024*1024+sk;
+    let emem = (qemu_mem_mb as usize)*1024*1024+PHY_MEM_START;
     let mut s_addr = Addr(new_ek);
     let mut e_addr = Addr(emem);
     s_addr = s_addr.ceil();

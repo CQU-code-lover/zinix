@@ -26,7 +26,6 @@ lazy_static!{
 }
 
 pub fn print_to_stdout(args: fmt::Arguments){
-    let guard = std_spinlock.lock().unwrap();
     Stdout.write_fmt(args).unwrap();
 }
 

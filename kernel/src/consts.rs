@@ -25,3 +25,7 @@ pub const MAX_ORDER_NR_PAGES:usize = 1<<(MAX_ORDER-1);
 pub const BOOT_STACK_NR_PAGES:usize = 4;
 pub const KERNEL_STACK_SIZE_ORDER:usize = 2;
 pub const STACK_MAGIC:u64 = 0xABCD1122ABCD1122;
+
+// boot map
+pub const PHY_MEM_OFF:usize = 0xFFFFFFD800000000;
+pub const PHY_MEM_START:usize = 0xFFFFFFD880000000;

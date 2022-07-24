@@ -1,5 +1,7 @@
     .section .text.init
     .globl _start
+    .global boot_stack
+    .global boot_stack_top
 _start:
     # a0 == hartid
     # pc == 0x80200000

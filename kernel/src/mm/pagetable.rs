@@ -8,6 +8,7 @@ use log::error;
 use riscv::asm::sfence_vma_all;
 
 use crate::consts::PAGE_SIZE;
+use crate::error_sync;
 use crate::mm::{alloc_pages, KERNEL_PAGETABLE};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::buddy::order2pages;
@@ -67,7 +68,7 @@ impl PageTable {
                 });
             }
             if pte.vaild() {
-                pg_addr = pte.get_point_paddr();
+                pg_addr = Addr(pte.get_point_paddr()).get_vaddr();
                 continue;
             }
             else {
@@ -92,7 +93,7 @@ impl PageTable {
             }
         }
         // bug：三级页表项出现RWX全0情况
-        error!("Walk Fault!");
+        error_sync!("Walk Fault!");
         return None;
     }
 
@@ -108,7 +109,7 @@ impl PageTable {
         let r= self._walk_common(vaddr,true);
         match r {
             None=>{
-                error!("bug");
+                error_sync!("bug");
                 WalkRet{
                     level: 0,
                     pte_addr: 0

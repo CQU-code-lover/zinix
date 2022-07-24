@@ -1,16 +1,24 @@
 use alloc::sync::{Arc, Weak};
-use riscv::register::mtvec::read;
-use crate::asm::{r_sp, r_tp};
+use alloc::vec::Splice;
+use core::cell::RefCell;
+use core::mem::size_of;
+use log::error;
+use crate::asm::{r_sp, r_sstatus, r_tp, SSTATUS_SIE, SSTATUS_SPIE, SSTATUS_SPP};
 use crate::consts::{BOOT_STACK_NR_PAGES, PAGE_SIZE, STACK_MAGIC};
 use crate::mm::mm::MmStruct;
 use crate::mm::pagetable::PageTable;
-use crate::SpinLock;
+use crate::{error_sync, SpinLock};
 use crate::task::{add_task, generate_tid};
 use crate::task::stack::Stack;
+use riscv::register::*;
+use crate::sbi::shutdown;
+use crate::task::task::TaskStatus::TaskRunning;
+use crate::trap::TrapFrame;
 
 extern "C" {
     fn switch_context(cur: *const TaskContext, next: *const TaskContext);
     fn kern_trap_ret();
+    fn user_trap_ret();
     fn boot_stack();
     fn boot_stack_top();
 }
@@ -19,6 +27,41 @@ enum TaskStatus {
     TaskRunning,
     TaskSleeping,
     TaskZombie,
+}
+
+struct RunningMut(Option<Arc<SpinLock<Task>>>);
+
+impl RunningMut {
+    fn new()->Self {
+        RunningMut(None)
+    }
+    fn set(&mut self,v:Arc<SpinLock<Task>>){
+        self.0 = Some(v);
+    }
+    fn get(&self)->Arc<SpinLock<Task>>{
+        self.0.as_ref().unwrap().clone()
+    }
+    fn clear(&mut self)->Option<Arc<SpinLock<Task>>>{
+        let ret = self.0.clone();
+        self.0 = None;
+        ret
+    }
+}
+
+lazy_static!{
+    static ref RUNNING:SpinLock<RunningMut> = SpinLock::new(RunningMut::new());
+}
+
+pub fn set_running(running:Arc<SpinLock<Task>>){
+    RUNNING.lock().unwrap().set(running);
+}
+
+pub fn get_running()->Arc<SpinLock<Task>>{
+    RUNNING.lock().unwrap().get()
+}
+
+pub fn RUNNING_TASK()->Arc<SpinLock<Task>>{
+    get_running()
 }
 
 #[repr(C)]
@@ -71,7 +114,7 @@ impl TaskContext {
 pub struct Task {
     tid: usize,
     tgid: usize,
-    kernel_stack: Option<Stack>,
+    kernel_stack: Stack,
     context: TaskContext,
     parent: Option<Weak<SpinLock<Task>>>,
     status: TaskStatus,
@@ -80,15 +123,16 @@ pub struct Task {
 
 impl Task {
     pub fn __core_init(){
-        let mut addr = boot_stack_top as usize;
+        let mut addr = boot_stack as usize;
         let sp = r_sp();
-        while addr<(boot_stack as usize) {
+        while addr<(boot_stack_top as usize) {
             if sp>addr&&sp<=addr+(PAGE_SIZE*BOOT_STACK_NR_PAGES){
                 // find
                 if sp-addr<=8 {
                     panic!("can`t insert stack magic for boot thread");
                 } else {
                     unsafe { (addr as *mut u64).write_volatile(STACK_MAGIC); }
+                    break;
                 }
             }
             addr+=(PAGE_SIZE*BOOT_STACK_NR_PAGES);
@@ -96,13 +140,20 @@ impl Task {
         let tsk = Task{
             tid: generate_tid(),
             tgid: 0,
-            kernel_stack: None,
+            kernel_stack: Stack::new(true,addr,addr+(PAGE_SIZE*BOOT_STACK_NR_PAGES)),
             context: TaskContext::new(),
             parent: None,
             status: TaskStatus::TaskRunning,
             mm: None
         };
-
+        sscratch::write(0);
+        unsafe {
+            #[cfg(feature = "qemu")]
+            sstatus::set_sum();
+        }
+        let t = Arc::new(SpinLock::new(tsk));
+        set_running(t.clone());
+        add_task(t);
     }
     pub fn is_kern(&self)->bool {
         match self.mm {
@@ -115,34 +166,39 @@ impl Task {
     }
     pub fn create_kern_task(func: fn())->Self {
         let p_fn = func as *const ();
-        let task = Task {
+        let mut tsk = Task {
             tid: generate_tid(),
             tgid: 0,
-            kernel_stack: 0,
-            context: TaskContext {
-                ra: p_fn as usize,
-                sp: 0,
-                s0: 0,
-                s1: 0,
-                s2: 0,
-                s3: 0,
-                s4: 0,
-                s5: 0,
-                s6: 0,
-                s7: 0,
-                s8: 0,
-                s9: 0,
-                s10: 0,
-                s11: 0,
-                sscratch: 0,
-                sstatus: 0,
-            },
-            pagetable: Arc::new(PageTable::default()),
+            kernel_stack: Stack::new(false,0,0),
+            context: TaskContext::new(),
             parent: None,
             status: TaskStatus::TaskRunning,
-            is_kernel: false,
-            mm: None,
+            mm: None
         };
-        task
+        tsk.context.ra = p_fn as usize;
+        unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
+        tsk.context.sstatus = r_sstatus()|SSTATUS_SPP|SSTATUS_SPIE|SSTATUS_SIE;
+        let mut tf = TrapFrame::new_empty();
+        tf.sstatus = r_sstatus()|SSTATUS_SPP|SSTATUS_SPIE;
+        tf.sepc = p_fn as usize;
+        tf.x2 = tsk.context.sp;
+        unsafe { tf.write_to(tsk.context.sp); }
+        tsk
     }
+    pub fn create_kern_task_and_run(func:fn()){
+        add_task(Arc::new(SpinLock::new(Self::create_kern_task(func))))
+    }
+    pub fn get_ctx_mut_ref(&mut self)->&mut TaskContext{
+        &mut self.context
+    }
+    pub unsafe fn check_magic(&self){
+        if !self.kernel_stack._check_magic(){
+            error_sync!("stack overflow");
+            shutdown();
+        }
+    }
+}
+
+pub fn task_cpu_init(){
+    Task::__core_init();
 }

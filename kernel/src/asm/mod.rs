@@ -28,11 +28,46 @@ macro_rules! reg_fn{
     };
 }
 
+macro_rules! read_csr {
+    ($fn: ident, $s: tt) => {
+        pub fn $fn()->usize{
+            unsafe{asm!("",in($s) val);}
+        }
+    };
+}
+
 reg_fn!(r_ra,w_ra,"ra");
-reg_fn!(r_tp,w_tp,"tp");
+
+pub const SSTATUS_SPP:usize= (1 << 8);  // Previous mode, 1=Supervisor, 0=User
+pub const SSTATUS_SPIE:usize= (1 << 5); // Supervisor Previous Interrupt Enable
+pub const SSTATUS_UPIE:usize= (1 << 4); // User Previous Interrupt Enable
+pub const SSTATUS_SIE:usize= (1 << 1);  // Supervisor Interrupt Enable
+pub const SSTATUS_UIE:usize= (1 << 0);  // User Interrupt Enable
+
+pub fn r_sstatus()->usize {
+    let mut val:usize = 0;
+    unsafe {
+        asm!("csrr {},sstatus", out(reg) val);
+    }
+    val
+}
+
+pub fn r_tp()->usize{
+    let mut tp:usize = 0;
+    unsafe {
+        asm!("mv {}, tp",out(reg) tp);
+    }
+    tp
+}
+
+pub fn w_tp(tp:usize){
+    unsafe {
+        asm!("mv tp, {}",in(reg) tp);
+    }
+}
 
 pub fn r_sp()->usize{
-    let sp:usize = 0;
+    let mut sp:usize = 0;
     unsafe {
         asm!("mv {}, sp",out(reg) sp);
     }

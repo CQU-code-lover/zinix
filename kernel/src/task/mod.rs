@@ -9,11 +9,11 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use log::error;
 
-use crate::{println, SpinLock};
+use crate::{error_sync, println, SpinLock};
 use crate::mm::mm::MmStruct;
 use crate::mm::pagetable::PageTable;
 use crate::sbi::shutdown;
-use crate::task::task::{Task, TaskContext};
+use crate::task::task::{set_running, Task, TaskContext};
 
 pub(crate) mod task;
 pub(crate) mod stack;
@@ -49,10 +49,10 @@ pub fn get_task() -> Arc<SpinLock<Task>> {
     running_list.lock().unwrap().pop_front().unwrap()
 }
 
-fn scheduler() {
+pub fn scheduler() {
     let mut rs = running_list.lock().unwrap();
     if rs.len() == 0 {
-        error!("Bug");
+        error_sync!("Bug");
     }
     if rs.len() == 1 {
         return;
@@ -60,8 +60,10 @@ fn scheduler() {
     let current = rs.pop_front().unwrap();
     rs.push_back(current.clone());
     let next_running = rs.front().unwrap();
-    let ctx_cur = &(current.lock().unwrap().context) as *const TaskContext;
-    let ctx_next = &(next_running.lock().unwrap().context) as *const TaskContext;
+    let ctx_cur = current.lock().unwrap().get_ctx_mut_ref() as *const TaskContext;
+    let ctx_next = next_running.lock().unwrap().get_ctx_mut_ref() as *const TaskContext;
+    set_running(next_running.clone());
+    drop(rs);
     unsafe {
         switch_context(ctx_cur, ctx_next);
     }
@@ -71,76 +73,13 @@ pub fn task_init() {
 
 }
 
-// pub fn task_test() {
-//     let mut task1 = Task {
-//         tid: 0,
-//         tgid: 0,
-//         kernel_stack: 0,
-//         context: TaskContext {
-//             ra: 0,
-//             sp: 0,
-//             s0: 0,
-//             s1: 0,
-//             s2: 0,
-//             s3: 0,
-//             s4: 0,
-//             s5: 0,
-//             s6: 0,
-//             s7: 0,
-//             s8: 0,
-//             s9: 0,
-//             s10: 0,
-//             s11: 0,
-//             sscratch: 0,
-//             sstatus: 0,
-//         },
-//         pagetable: Arc::new(SpinLock::new(PageTable::default())),
-//         parent: None,
-//         status: TaskStatus::TaskRunning,
-//         is_kernel: false,
-//         mm: None,
-//     };
-//     let p_fn = test_switch_func as *const ();
-//     task1.context.ra = p_fn as usize;
-//     add_task(Arc::new(SpinLock::new(task1)));
-//
-//     let mut task2 = Task {
-//         tid: 0,
-//         tgid: 0,
-//         kernel_stack: 0,
-//         context: TaskContext {
-//             ra: 0,
-//             sp: 0,
-//             s0: 0,
-//             s1: 0,
-//             s2: 0,
-//             s3: 0,
-//             s4: 0,
-//             s5: 0,
-//             s6: 0,
-//             s7: 0,
-//             s8: 0,
-//             s9: 0,
-//             s10: 0,
-//             s11: 0,
-//             sscratch: 0,
-//             sstatus: 0,
-//         },
-//         pagetable: Arc::new(SpinLock::new(PageTable::default())),
-//         parent: None,
-//         status: TaskStatus::TaskRunning,
-//         is_kernel: false,
-//         mm: None,
-//     };
-//     let p_fn = test_switch_func as *const ();
-//     task2.context.ra = p_fn as usize;
-//     add_task(Arc::new(SpinLock::new(task2)));
-//
-//     println!("start schedule");
-//     scheduler();
-// }
-//
-// fn test_switch_func() {
-//     println!("This is Test Function");
-//     shutdown();
-// }
+pub fn task_test() {
+    Task::create_kern_task_and_run(test_switch_func);
+    println!("start schedule");
+}
+
+fn test_switch_func() {
+    loop {
+        println!("This is Test Function");
+    }
+}

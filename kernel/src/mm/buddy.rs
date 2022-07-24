@@ -9,7 +9,7 @@ use core::ops::Add;
 use log::{error, info, log_enabled, set_max_level, warn};
 use riscv::interrupt::free;
 
-use crate::{cpu_local, println, SpinLock};
+use crate::{cpu_local, info_sync, println, SpinLock};
 use crate::consts::{MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::bitmap::{Bitmap, bitmap_test};
@@ -302,7 +302,7 @@ pub fn buddy_test(){
     let mut b = BuddyAllocator::new(Addr(0x0),Addr(0x1000000));
     let m = b.alloc_area(0);
     b.free_area(m.unwrap(), 0);
-    info!("\n{:?}",b);
+    info_sync!("\n{:?}",b);
     // page_test();
     shutdown();
 }

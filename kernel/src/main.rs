@@ -9,7 +9,6 @@
 #![feature(linked_list_remove)]
 #![feature(default_free_fn)]
 #![feature(linked_list_cursors)]
-#![feature(asm)]
 #![allow(unused_imports)]
 //trace_macros!(true);
 
@@ -22,7 +21,7 @@ extern crate lazy_static;
 use core::ops::Generator;
 
 use buddy_system_allocator::LockedHeap;
-use log::{error, info, LevelFilter, warn};
+use log::{debug, error, info, LevelFilter, trace, warn};
 use riscv::register::{sie, sstatus, stvec};
 use riscv::register::mie::read;
 use riscv::register::mtvec::TrapMode;
@@ -33,7 +32,10 @@ use crate::mm::buddy::buddy_test;
 use crate::mm::mm_init;
 use crate::sync::cpu_local::{get_core_id, set_core_id};
 use crate::sync::SpinLock;
-use crate::timer::set_next_trigger;
+use crate::task::task::{Task, task_cpu_init};
+use crate::task::task_test;
+use crate::trap::timer::timer_startup;
+use crate::trap::trap_init;
 
 #[macro_use]
 
@@ -41,7 +43,6 @@ mod compile;
 mod sbi;
 mod console;
 mod trap;
-mod timer;
 mod consts;
 mod logger;
 mod sync;
@@ -49,6 +50,7 @@ mod mm;
 mod utils;
 mod task;
 mod asm;
+mod syscall;
 
 global_asm!(include_str!("entry.asm"));
 
@@ -68,13 +70,20 @@ fn start_kernel(cpu:usize,dev_tree:usize) {
     }
     let grd2 = lock.lock().unwrap();
     early_logger_init();
-    log::set_max_level(LevelFilter::Trace);
+    debug!("Debug");
     info!("info");
+    trace!("trace");
     warn!("warn");
     println!("{:x}",stvec::read().bits());
     println!("cpu {:?}",get_core_id());
-    // set_next_trigger();
+    trap_init();
     mm_init();
+    task_cpu_init();
+    task_test();
+    timer_startup();
+    loop {
+        debug_sync!("MAIN");
+    }
     let p_fn = test as *const ();
     let p:fn(usize,usize) = unsafe { core::mem::transmute(p_fn) };
     println!("function:{:x}",p_fn as usize);

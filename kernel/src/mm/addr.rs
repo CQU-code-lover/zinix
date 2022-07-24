@@ -3,7 +3,7 @@ use core::fmt::{Debug, Formatter};
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 use core::ptr::addr_of;
 
-use crate::consts::{PAGE_OFFSET, PAGE_SIZE};
+use crate::consts::{PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFF};
 
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -80,12 +80,18 @@ impl From<usize> for Addr {
     fn from(v: usize) -> Self { Self(v) }
 }
 
+impl From<PFN> for Addr {
+    fn from(pfn: PFN) -> Self {
+        Self(pfn.get_addr_usize())
+    }
+}
+
 impl From<usize> for PFN {
-    fn from(v: usize) -> Self { Self(v) }
+    fn from(v: usize) -> Self { Self(v>>PAGE_OFFSET) }
 }
 
 impl From<Addr> for PFN {
-    fn from(v: Addr) -> Self { Self(v.0) }
+    fn from(v: Addr) -> Self { Self(v.0>>PAGE_OFFSET) }
 }
 
 impl Addr {
@@ -103,6 +109,12 @@ impl Addr {
     }
     pub fn get_pg_cnt(&self)->usize{
         return self.0/PAGE_SIZE;
+    }
+    pub fn get_paddr(&self)->usize {
+        self.0 - PHY_MEM_OFF
+    }
+    pub fn get_vaddr(&self)->usize {
+        self.0 + PHY_MEM_OFF
     }
 }
 
