@@ -166,7 +166,6 @@ impl VmaCache {
             }
             cursor.move_next();
         }
-
         // cache miss
         None
     }

@@ -22,12 +22,12 @@ use crate::mm::page::Page;
 use crate::sync::SpinLockGuard;
 use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
 
-mod addr;
+pub(crate) mod addr;
 pub(crate) mod page;
 pub(crate) mod buddy;
-mod bitmap;
+pub(crate) mod bitmap;
 pub(crate) mod pagetable;
-mod vma;
+pub(crate) mod vma;
 pub(crate) mod mm;
 
 const k210_mem_mb:u32 = 6;

@@ -207,9 +207,6 @@ impl PageTable {
 
     // todo map的pages需要添加到mm空间的表中
     pub fn flush_all(){
-        // unsafe {
-        //     asm!("vma.flush");
-        // }
         unsafe { sfence_vma_all(); }
     }
     fn _get_root_page_addr(& self) ->usize{

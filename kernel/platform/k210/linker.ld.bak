@@ -1,22 +1,20 @@
-OUTPUT_ARCH(riscv64)
+OUTPUT_ARCH(riscv)
 ENTRY(_start)
-
-BASE_ADDR = 0xffffffd880020000;
+BASE_ADDRESS = 0x80020000;
 SECTIONS
 {
-    . = BASE_ADDR;
+    . = BASE_ADDRESS;
     skernel = .;
-    stext = .;
-    .text.init : {
-        *(.text.init)
-    }
+    skernel = .;
 
+    stext = .;
     .text : {
+        *(.text.entry)
         *(.text .text.*)
     }
-    etext = .;
 
     . = ALIGN(4K);
+    etext = .;
     srodata = .;
     .rodata : {
         *(.rodata .rodata.*)
@@ -35,13 +33,13 @@ SECTIONS
     edata = .;
     .bss : {
         *(.bss.stack)
-        sbss_clear = .;
+        sbss = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)
     }
 
     . = ALIGN(4K);
-    ebss_clear = .;
+    ebss = .;
     ekernel = .;
 
     /DISCARD/ : {

@@ -9,6 +9,7 @@
 #![feature(linked_list_remove)]
 #![feature(default_free_fn)]
 #![feature(linked_list_cursors)]
+#![feature(step_trait)]
 #![allow(unused_imports)]
 //trace_macros!(true);
 
@@ -34,6 +35,7 @@ use crate::sync::cpu_local::{get_core_id, set_core_id};
 use crate::sync::SpinLock;
 use crate::task::task::{Task, task_cpu_init};
 use crate::task::task_test;
+use crate::test::do_test;
 use crate::trap::timer::timer_startup;
 use crate::trap::trap_init;
 
@@ -51,6 +53,9 @@ mod utils;
 mod task;
 mod asm;
 mod syscall;
+mod fs;
+mod test;
+mod io;
 
 global_asm!(include_str!("entry.asm"));
 
@@ -80,6 +85,7 @@ fn start_kernel(cpu:usize,dev_tree:usize) {
     mm_init();
     task_cpu_init();
     task_test();
+    do_test();
     timer_startup();
     loop {
         debug_sync!("MAIN");

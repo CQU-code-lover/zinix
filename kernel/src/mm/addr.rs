@@ -1,5 +1,6 @@
 use core::fmt;
 use core::fmt::{Debug, Formatter};
+use core::iter::Step;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 use core::ptr::addr_of;
 
@@ -12,6 +13,38 @@ pub struct Addr(pub usize);
 impl Default for Addr {
     fn default() -> Self {
         Addr(0)
+    }
+}
+
+impl Step for Addr {
+    fn steps_between(start: &Self, end: &Self) -> Option<usize> {
+        if start<=end {
+            Some(end.0-start.0)
+        } else {
+            None
+        }
+    }
+
+    fn forward_checked(start: Self, count: usize) -> Option<Self> {
+        match start.0.checked_add(count) {
+            None => {
+                None
+            }
+            Some(v) => {
+                Some(Addr(v))
+            }
+        }
+    }
+
+    fn backward_checked(start: Self, count: usize) -> Option<Self> {
+        match start.0.checked_sub(count) {
+            None => {
+                None
+            }
+            Some(v) => {
+                Some(Addr(v))
+            }
+        }
     }
 }
 

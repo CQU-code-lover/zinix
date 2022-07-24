@@ -63,7 +63,7 @@ class Platform:
 def common_clean(self):
     os.system("cargo clean")
     os.system("rm "+"last-"+self.name)
-    os.system("rm linker.ld")
+    os.system("rm linker.ld.bak")
     os.system("rm dump.txt")
     os.system("rm head.txt")
 
@@ -79,9 +79,11 @@ def qemu_pre_build(self):
         pass
     else:
         last_flag_file = os.popen("ls last-*")
-        last_flag_file = last_flag_file.read()
+        last_flag_file = last_flag_file.readline()
         if last_flag_file != "":
-            platforms[last_flag_file].clean()
+            last_flag_file = last_flag_file[:-1].split("-")[1]
+            p = platforms[last_flag_file]
+            p.clean(p)
         os.system("touch "+flag_file)
 
     os.system("cp platform/"+self.name+"/linker.ld .")
@@ -139,12 +141,94 @@ def qemu_run(self,debug):
         cmd += " -S -s"
     os.system(cmd)
 
+
+
+# k210 function
+def k210_clean(self):
+    common_clean(self)
+
+def k210_pre_build(self):
+    flag_file = "last-"+self.name
+    print(self)
+    ret = os.system("cat "+flag_file)
+    if ret == 0:
+        pass
+    else:
+        last_flag_file = os.popen("ls last-*")
+        last_flag_file = last_flag_file.readline()
+        if last_flag_file != "":
+            last_flag_file = last_flag_file[:-1].split("-")[1]
+            p = platforms[last_flag_file]
+            p.clean(p)
+        os.system("touch "+flag_file)
+
+    os.system("cp platform/"+self.name+"/linker.ld .")
+
+def k210_build(self):
+    print("Build Platform:"+self.name)
+    self.pre_build(self)
+    if is_debug():
+        # return os.system("cargo build --target targets/riscv64.json")==0
+        return os.system("cargo build --no-default-features --features \"k210\"")==0
+    else:
+        return os.system("cargo build --release  --no-default-features --features k210")==0
+
+def k210_after_build(self):
+    if not self.build(self):
+        return False
+    cmd = " cp ../bootloader/rustsbi-k210.bin os.bin"+ \
+    "&& "+OBJCOPY+" "+KERNEL_ELF+" --strip-all -O binary " +KERNEL_BIN+ \
+    "&& dd if="+KERNEL_BIN+" of=os.bin bs=128k seek=1" \
+                          "&& echo 123456 "
+    print(cmd)
+
+    if DEBUG:
+        print(cmd)
+    os.system(cmd)
+    cmd = OBJDUMP+" -S "+KERNEL_ELF+">dump.txt"
+    if DEBUG:
+        print(cmd)
+    os.system(cmd)
+
+    #cmd = OBJDUMP+" -h "+KERNEL_ELF+">head.txt"
+    cmd = "objdump -h "+KERNEL_ELF+">head.txt"
+    if DEBUG:
+        print(cmd)
+    os.system(cmd)
+
+    cmd = NM+" "+KERNEL_ELF+">nm.txt"
+    if DEBUG:
+        print(cmd)
+    os.system(cmd)
+
+    cmd = READELF+" --segments "+KERNEL_ELF+">>head.txt"
+    if DEBUG:
+        print(cmd)
+    os.system(cmd)
+
+    return True
+
+def k210_run(self,debug):
+    if not self.after_build(self):
+        exit(-1)
+    print("build all OK!")
+    print("start run...")
+    cmd = "sudo chmod 777 /dev/ttyUSB0"+\
+    "&& python3 kflash.py -p /dev/ttyUSB0 -b 1500000 -t os.bin"
+    if debug:
+        cmd += " -S -s"
+    os.system(cmd)
+
+
+
+
 # first of all: check and update environment
 env_check()
 
 q = Platform("qemu",pre_build=qemu_pre_build,build=qemu_build,
          after_build=qemu_after_build,clean=qemu_clean,run=qemu_run)
-
+k = Platform("k210",pre_build=k210_pre_build,build=k210_build,
+             after_build=k210_after_build,clean=k210_clean,run=k210_run)
 parser = argparse.ArgumentParser()
 run_build_group = parser.add_mutually_exclusive_group()
 parser.add_argument("-p","--platform",help="use --show-platforms option to show support platform list , default "
