@@ -9,7 +9,7 @@ use core::ops::Add;
 use log::{error, info, log_enabled, set_max_level, warn};
 use riscv::interrupt::free;
 
-use crate::{cpu_local, info_sync, println, SpinLock};
+use crate::{cpu_local, info_sync, println, SpinLock, trace_sync};
 use crate::consts::{MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::bitmap::{Bitmap, bitmap_test};
@@ -33,6 +33,17 @@ pub fn order2pages(order:usize)->usize{
         0
     }
 }
+
+pub fn pages2order(pages:usize)->usize{
+    for i in 0..MAX_ORDER{
+        if order2pages(i)>=pages{
+            return i;
+        }
+    }
+    error!("pg2order fail");
+    return MAX_ORDER;
+}
+
 
 impl Default for BuddyAllocator {
     fn default()->Self {
@@ -109,10 +120,12 @@ impl BuddyAllocator{
                             // alloc OK from high order
                             let pgs = order2pages(order);
                             let re_insert_pfn = pfn.clone().step_n(pgs);
-                            self.free_areas[order].insert_area(BuddyItem {
+                            trace_sync!("reinsert buddy: (PFN,order) = ({:?}, {})",re_insert_pfn,order);
+                            let insert_ret = self.free_areas[order].insert_area(BuddyItem {
                                 first_page: re_insert_pfn,
                                 pg_cnt: pgs,
                             });
+                            assert!(insert_ret.is_none());
                             return Ok(pfn);
                         }
                         _ => {
@@ -149,12 +162,6 @@ impl BuddyAllocator{
             }
         }
         return Err(-1);
-    }
-    pub fn alloc_pages(order:usize)->Option<Addr>{
-        None
-    }
-    pub fn free_pages(addr:Addr, order:usize){
-
     }
 }
 
@@ -246,14 +253,14 @@ impl FreeArea {
                     self.free_cnt -= 2;
                     self.bitmap.clear(index);
                     // self.bitmap.turn_over(index);
-                    let new_item = BuddyItem{
-                        first_page: PFN(
-                            if removed_item.first_page<item.first_page {
-                                removed_item.first_page.0
+                    let new_item = BuddyItem {
+                        first_page:
+                            if removed_item.first_page < item.first_page {
+                                removed_item.first_page
                             } else {
-                                item.first_page.0
+                                item.first_page
                             }
-                        ),
+                        ,
                         pg_cnt: item.pg_cnt*2
                     };
                     return Some(new_item);

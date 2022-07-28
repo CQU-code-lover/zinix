@@ -1,5 +1,6 @@
 pub mod timer;
 
+use core::arch::global_asm;
 use core::fmt::{Debug, Formatter};
 use core::mem::size_of;
 use log::debug;
@@ -7,7 +8,7 @@ use riscv::register::{sie, sstatus, stvec, scause};
 use riscv::register::scause::{Exception, Interrupt, Trap};
 use riscv::register::stvec::TrapMode;
 use crate::{debug_sync, println};
-use crate::asm::{disable_irq, enable_irq};
+use crate::asm::{disable_irq, enable_irq, r_stval};
 use crate::sbi::shutdown;
 use crate::syscall::syscall_entry;
 use crate::task::task::RUNNING_TASK;
@@ -121,7 +122,7 @@ impl TrapFrame {
 #[no_mangle]
 fn irq_handler(trap_frame:&mut TrapFrame){
     unsafe { RUNNING_TASK().lock().unwrap().check_magic(); }
-    debug_sync!("IRQ\n{:?}",trap_frame);
+    // debug!("IRQ\n{:?}",trap_frame);
     match scause::read().cause() {
         Trap::Interrupt(irq) => {
             match irq {
@@ -157,6 +158,7 @@ fn exc_handler(trap_frame:&mut TrapFrame){
     let irq_state = disable_irq();
     unsafe { RUNNING_TASK().lock().unwrap().check_magic(); }
     debug_sync!("EXC\n{:?}",trap_frame);
+    debug_sync!("sstval:{:#X}",r_stval());
     match scause::read().cause() {
         Trap::Exception(exc) => {
             match exc {

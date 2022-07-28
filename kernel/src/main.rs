@@ -1,7 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(global_asm)]
-#![feature(asm)]
 #![feature(panic_info_message)]
 #![feature(generator_trait)]
 #![feature(trace_macros)]
@@ -10,7 +8,9 @@
 #![feature(default_free_fn)]
 #![feature(linked_list_cursors)]
 #![feature(step_trait)]
+#![feature(mixed_integer_ops)]
 #![allow(unused_imports)]
+#![allow(unused_variables)]
 //trace_macros!(true);
 
 extern crate alloc;
@@ -19,6 +19,7 @@ extern crate bitflags;
 #[macro_use]
 extern crate lazy_static;
 
+use core::arch::global_asm;
 use core::ops::Generator;
 
 use buddy_system_allocator::LockedHeap;
@@ -27,6 +28,8 @@ use riscv::register::{sie, sstatus, stvec};
 use riscv::register::mie::read;
 use riscv::register::mtvec::TrapMode;
 use riscv::register::sstatus::Sstatus;
+use crate::asm::r_sstatus;
+use crate::fs::fat::fat_init;
 
 use crate::logger::early_logger_init;
 use crate::mm::buddy::buddy_test;
@@ -62,6 +65,7 @@ global_asm!(include_str!("entry.asm"));
 #[no_mangle]
 fn start_kernel(cpu:usize,dev_tree:usize) {
     set_core_id(cpu);
+
     extern "C" { fn trap_entry(); }
     unsafe {
         stvec::write(trap_entry as usize, TrapMode::Direct);
@@ -84,11 +88,15 @@ fn start_kernel(cpu:usize,dev_tree:usize) {
     trap_init();
     mm_init();
     task_cpu_init();
-    task_test();
-    do_test();
+    // task_test();
+    let s= r_sstatus();
+    println!("{:#X}",s);
     timer_startup();
+    fat_init();
+    unsafe {    do_test();
+    }
     loop {
-        debug_sync!("MAIN");
+        // debug_sync!("MAIN");
     }
     let p_fn = test as *const ();
     let p:fn(usize,usize) = unsafe { core::mem::transmute(p_fn) };

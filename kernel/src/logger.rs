@@ -100,7 +100,7 @@ macro_rules! debug_sync {
     ($($arg:tt)+) => {
         {
             let g = crate::logger::log_sync_lock();
-            debug!($($arg)+)
+            log::debug!($($arg)+)
         }
     }
 }
@@ -110,7 +110,7 @@ macro_rules! warn_sync {
     ($($arg:tt)+) => {
         {
             let g = crate::logger::log_sync_lock();
-            warn!($($arg)+)
+            log::warn!($($arg)+)
         }
     }
 }
@@ -120,7 +120,7 @@ macro_rules! trace_sync {
     ($($arg:tt)+) => {
         {
             let g = crate::logger::log_sync_lock();
-            trace!($($arg)+)
+            log::trace!($($arg)+)
         }
     }
 }
@@ -130,7 +130,7 @@ macro_rules! error_sync {
     ($($arg:tt)+) => {
         {
             let g = crate::logger::log_sync_lock();
-            error!($($arg)+)
+            log::error!($($arg)+)
         }
     }
 }

@@ -48,7 +48,7 @@
 #![cfg_attr(not(all(feature = "alloc", feature = "lfn")), allow(dead_code, unused_imports))]
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions, clippy::cast_possible_truncation)]
-
+#![feature(asm)]
 extern crate log;
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
@@ -66,7 +66,9 @@ mod fs;
 mod io;
 mod table;
 mod time;
-
+mod logger;
+mod sbi;
+mod console;
 pub use crate::dir::*;
 pub use crate::dir_entry::*;
 pub use crate::error::*;

@@ -1,7 +1,13 @@
-mod virtio;
+pub mod virtio;
+pub mod sdcard;
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
+use fatfs::IntoStorage;
+use virtio::VirtioDev;
+use crate::fs::fat::BlkStorage;
 
 pub struct IOBytes<T>{
     inner:T
@@ -104,4 +110,24 @@ pub trait Read {
     // {
     //     Take { inner: self, limit }
     // }
+}
+
+pub trait BlockRead{
+    fn read_block(&self,blk_no:usize,buf:&mut [u8]);
+}
+
+pub trait BlockWrite{
+    fn write_block(&self,blk_no:usize,buf:&[u8]);
+}
+
+pub trait BlockReadWrite:BlockRead+BlockWrite+Send+Sync+Any{
+
+}
+
+pub trait BlockReadBuf:BlockRead{
+
+}
+
+pub trait BlockWriteBuf:BlockWrite{
+
 }

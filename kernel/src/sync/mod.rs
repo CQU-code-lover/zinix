@@ -6,6 +6,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::error;
 use crate::asm::{disable_irq, enable_irq};
+use crate::println;
 
 pub type LockResult<Guard> = Result<Guard, u32>;
 

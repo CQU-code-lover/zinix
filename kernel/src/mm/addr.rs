@@ -4,7 +4,7 @@ use core::iter::Step;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 use core::ptr::addr_of;
 
-use crate::consts::{PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFF};
+use crate::consts::{PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET};
 
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -127,6 +127,25 @@ impl From<Addr> for PFN {
     fn from(v: Addr) -> Self { Self(v.0>>PAGE_OFFSET) }
 }
 
+pub struct AddrPageIter{
+    end:Addr,
+    cur:Addr
+}
+
+impl Iterator for AddrPageIter{
+    type Item = Addr;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = if self.cur<self.end{
+            Some(self.cur)
+        } else {
+            None
+        };
+        self.cur+=Addr(PAGE_SIZE);
+        ret
+    }
+}
+
 impl Addr {
     pub fn floor(&self)->Addr{
         Addr::from((self.0/PAGE_SIZE)*PAGE_SIZE)
@@ -140,14 +159,21 @@ impl Addr {
             }
         )
     }
+    pub fn is_align(&self)->bool{
+        self.0%PAGE_SIZE == 0
+    }
     pub fn get_pg_cnt(&self)->usize{
         return self.0/PAGE_SIZE;
     }
     pub fn get_paddr(&self)->usize {
-        self.0 - PHY_MEM_OFF
+        self.0 - PHY_MEM_OFFSET
     }
     pub fn get_vaddr(&self)->usize {
-        self.0 + PHY_MEM_OFF
+        self.0 + PHY_MEM_OFFSET
+    }
+    pub fn page_iter(&self,len:usize)->AddrPageIter {
+        assert!(self.is_align());
+        AddrPageIter{ end: *self + Addr(len), cur: *self }
     }
 }
 

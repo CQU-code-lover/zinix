@@ -5,7 +5,6 @@ use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::ptr::{addr_of, NonNull, null};
 
-use bitmaps::Bitmap;
 use buddy_system_allocator::LockedHeap;
 use log::{error, info};
 use riscv::register::fcsr::Flags;
@@ -15,7 +14,7 @@ use page::PagesManager;
 use pagetable::create_kernel_pagetable;
 use pagetable::PageTable;
 
-use crate::{consts, info_sync, SpinLock};
+use crate::{consts, info_sync, SpinLock, trace_sync};
 use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_START};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::page::Page;
@@ -29,6 +28,7 @@ pub(crate) mod bitmap;
 pub(crate) mod pagetable;
 pub(crate) mod vma;
 pub(crate) mod mm;
+mod aux;
 
 const k210_mem_mb:u32 = 6;
 const qemu_mem_mb:u32 = 6;
@@ -55,6 +55,15 @@ lazy_static!{
     static ref KERNEL_PAGETABLE:Arc<SpinLock<PageTable>> = Arc::new(SpinLock::new(create_kernel_pagetable()));
     static ref BUDDY_ALLOCATOR:SpinLock<BuddyAllocator> = SpinLock::new(Default::default());
     static ref PAGES_MANAGER:SpinLock<PagesManager> = SpinLock::new(Default::default());
+}
+
+pub fn trace_global_buddy(){
+    let b:&BuddyAllocator = &*BUDDY_ALLOCATOR.lock_irq().unwrap();
+    trace_sync!("{:?}",b);
+}
+
+pub fn get_kernel_pagetable()->Arc<SpinLock<PageTable>>{
+    KERNEL_PAGETABLE.clone()
 }
 
 fn page_init(start_addr:Addr, end_addr:Addr){
@@ -102,6 +111,10 @@ pub fn alloc_pages(order:usize)->Option<Arc<Page>>{
             None
         }
     }
+}
+
+pub fn alloc_one_page()->Option<Arc<Page>>{
+    alloc_pages(0)
 }
 
 // free a pages block..

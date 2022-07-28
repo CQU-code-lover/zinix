@@ -136,7 +136,8 @@ def qemu_run(self,debug):
                -machine virt \
               -nographic \
               -bios ../bootloader/rustsbi-qemu.bin \
-              -device loader,addr=0x80200000,file="+KERNEL_BIN+" "
+              -device loader,addr=0x80200000,file="+KERNEL_BIN+" " + \
+    "-drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0"
     if debug:
         cmd += " -S -s"
     os.system(cmd)
@@ -169,9 +170,9 @@ def k210_build(self):
     self.pre_build(self)
     if is_debug():
         # return os.system("cargo build --target targets/riscv64.json")==0
-        return os.system("cargo build --no-default-features --features \"k210\"")==0
+        return os.system("cargo build --no-default-features --features \"k210,debug\"")==0
     else:
-        return os.system("cargo build --release  --no-default-features --features k210")==0
+        return os.system("cargo build --release  --no-default-features --features k210,debug")==0
 
 def k210_after_build(self):
     if not self.build(self):

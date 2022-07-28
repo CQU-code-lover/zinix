@@ -3,13 +3,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::cmp::Ordering;
-
+use fatfs::debug;
+use log::log;
 use log::error;
 use riscv::asm::sfence_vma_all;
 
 use crate::consts::PAGE_SIZE;
-use crate::error_sync;
-use crate::mm::{alloc_pages, KERNEL_PAGETABLE};
+use crate::{debug_sync, error_sync, SpinLock, trace_sync};
+use crate::mm::{alloc_pages, KERNEL_PAGETABLE, skernel};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::buddy::order2pages;
 use crate::mm::page::Page;
@@ -19,11 +20,12 @@ extern "C" {
     fn boot_pagetable();
 }
 
-#[derive(Clone)]
 pub struct PageTable{
     // private pages for pagetable..
     // this pages can`t share with other address space..
-    private_pgs: Vec<Arc<Page>>
+    // the lock also used for protect real pagetable in memory
+    // pagetable will accessed by irq handler or exc handler. use irq_lock to get lock
+    private_pgs: SpinLock<Vec<Arc<Page>>>
 }
 
 const WalkRetLevelRoot:usize = 0;
@@ -33,6 +35,17 @@ const WalkRetLevelLeaf:usize = 2;
 pub struct WalkRet{
     level:usize,
     pte_addr:usize,
+}
+
+impl WalkRet {
+    pub fn get_pte(&self)->PTE{
+        let entry =unsafe {get_usize_by_addr(self.pte_addr)};
+        let mut pte = PTE::from(entry);
+        pte
+    }
+    pub fn get_level(&self)->usize{
+        self.level
+    }
 }
 
 impl PageTable {
@@ -48,12 +61,14 @@ impl PageTable {
         }
         p
     }
-    fn _insert_new_pages(&mut self,pgs : Arc<Page>) {
-        self.private_pgs.push(pgs)
+    fn _insert_new_pages(&self,pgs : Arc<Page>) {
+        self.private_pgs.lock_irq().unwrap().push(pgs)
     }
     // alloc时默认不使用大页
-    fn _walk_common(&mut self, vaddr:usize, alloc:bool)->Option<WalkRet>{
+    fn _walk_common(&self, vaddr:usize, alloc:bool)->Option<WalkRet>{
+        // walk will access pagetable,use lock..
         let mut pg_addr = self._get_root_page_addr();
+        let mut lock = self.private_pgs.lock_irq().unwrap();
         let ppn_arr = [addr_get_ppn2(vaddr),addr_get_ppn1(vaddr),addr_get_ppn0(vaddr)];
         for i in 0..3{
             let index = ppn_arr[i];
@@ -61,6 +76,8 @@ impl PageTable {
             let entry =unsafe {get_usize_by_addr(entry_addr)};
             let mut pte = PTE::from(entry);
             // 如果是leaf，不管pte是否valid都能返回
+            trace_sync!("pte:{},{}",pte.flags,pte.get_point_paddr());
+            // is_leaf可以判断大页的leaf
             if pte.is_leaf(){
                 return Some(WalkRet{
                     level: i,
@@ -72,11 +89,13 @@ impl PageTable {
                 continue;
             }
             else {
-                // not get next
+                // invalid 的页表项，不是leaf
                 if alloc {
                     let pg_arc = alloc_pages(0).unwrap();
                     let addr_usize = pg_arc.get_pfn().0;
-                    self._insert_new_pages(pg_arc);
+                    // 防止deadlock
+                    // self._insert_new_pages(pg_arc);
+                    lock.push(pg_arc);
                     pte.set_ppn(addr_usize);
                     //set RWX
                     //此时一定是非叶子页表
@@ -100,11 +119,11 @@ impl PageTable {
     // walk pagetable but not alloc new page.
     // return leaves pagetable`s PTE addr...
     // so we can mapping it...
-    pub fn walk(&mut self, vaddr:usize)->Option<WalkRet>{
+    pub fn walk(&self, vaddr:usize)->Option<WalkRet>{
         return self._walk_common(vaddr,false);
     }
     // walk pagetable and alloc new page when don`t have valid page.
-    pub fn walk_alloc(&mut self, vaddr:usize)->WalkRet{
+    pub fn walk_alloc(&self, vaddr:usize)->WalkRet{
         // alloc是不会返回None，否则会panic
         let r= self._walk_common(vaddr,true);
         match r {
@@ -118,8 +137,10 @@ impl PageTable {
             Some(ret)=> ret
         }
     }
-    pub fn map_one_page(&mut self, vaddr:Addr, page:&Arc<Page>, flags:u8) {
+    pub fn map_one_page(&self, vaddr:Addr, page:Arc<Page>, flags:u8) {
         let r = self.walk_alloc(vaddr.0);
+
+        let lock = self.private_pgs.lock_irq().unwrap();
         match r.level {
             WalkRetLevelLeaf => {
                 let pte_val = unsafe { get_usize_by_addr(r.pte_addr) };
@@ -139,18 +160,22 @@ impl PageTable {
     }
     // this func can`t check mapped virtual space exist other map.
     // must check by caller
-    pub fn map_pages(&mut self,vaddr:Addr, pages:Arc<Page>,flags:u8){
-        self.map_one_page(vaddr,&pages,flags);
+    pub fn map_pages(&self,vaddr:Addr, pages:Arc<Page>,flags:u8){
+        self.map_one_page(vaddr, pages.clone(), flags);
+        let mut vaddr_now = vaddr+Addr(PAGE_SIZE);
         for pg in pages.get_inner_guard().get_friend().iter() {
-            self.map_one_page(vaddr+Addr(PAGE_SIZE),pg,flags);
+            self.map_one_page(vaddr_now, pg.clone(), flags);
+            let mut vaddr_now = vaddr_now+Addr(PAGE_SIZE);
         }
     }
     // return the unmap page`s paddr
     // this func is not pub, because unmap one map in
     // a pages block which len is not 1 is not allowed.
-    fn _unmap_one_page(&mut self ,vaddr:Addr)->Result<Addr,isize>{
+    fn _unmap_one_page(&self ,vaddr:Addr)->Result<Addr,isize>{
         let mut ret:Result<Addr,isize> = Err(-1);
         let r = self.walk_alloc(vaddr.0);
+
+        let lock = self.private_pgs.lock_irq().unwrap();
         match r.level {
             WalkRetLevelLeaf => {
                 let pte_val = unsafe { get_usize_by_addr(r.pte_addr) };
@@ -174,7 +199,7 @@ impl PageTable {
     // unmap pages.
     // Can only free all of a page block, not a portion of it.
     // otherwise a panic will be report.
-    pub fn unmap_pages(&mut self,vaddr:Addr,order:usize)->Addr{
+    pub fn unmap_pages(&self,vaddr:Addr,order:usize)->Addr{
         let pgs = order2pages(order);
         let mut ret_option : Option<Addr> = None;
         let mut vaddr_probe = vaddr;
@@ -206,11 +231,11 @@ impl PageTable {
     }
 
     // todo map的pages需要添加到mm空间的表中
-    pub fn flush_all(){
-        unsafe { sfence_vma_all(); }
+    pub unsafe fn flush_self(&self){
+        sfence_vma_all();
     }
     fn _get_root_page_addr(& self) ->usize{
-        self.private_pgs[0].get_pfn().0
+        self.private_pgs.lock_irq().unwrap()[0].get_pfn().get_addr_usize()
     }
 }
 
@@ -218,7 +243,7 @@ impl Default for PageTable {
     fn default() -> Self {
         PageTable{
             // alloc one pages for root page table
-            private_pgs:vec![alloc_pages(0).unwrap()]
+            private_pgs:SpinLock::new(vec![alloc_pages(0).unwrap()])
         }
     }
 }
@@ -242,7 +267,7 @@ bitflags! {
     }
 }
 
-struct PTE{
+pub struct PTE{
     flags:u8,
     // rsw:u8, // 只能使用两位
     pnn0:u16, // 只能使用三位
@@ -253,7 +278,7 @@ struct PTE{
 impl Into<usize> for PTE {
     fn into(self) -> usize {
         let v:usize = 0;
-        v|self.flags as usize|((self.pnn0<<10) as usize)|((self.pnn1<<19) as usize)|((self.pnn2<<28) as usize)
+        v|self.flags as usize|((self.pnn0 as usize)<<10)|((self.pnn1 as usize)<<19)|((self.pnn2 as usize)<<28)
     }
 }
 
@@ -294,8 +319,8 @@ impl PTE {
         return self._get_bits(PTEFlags::V.bits);
     }
     fn is_leaf(&self)->bool{
-        return !((self._get_bits(PTEFlags::R.bits)==false)&
-            (self._get_bits(PTEFlags::W.bits)==false)&
+        return !((self._get_bits(PTEFlags::R.bits)==false)&&
+            (self._get_bits(PTEFlags::W.bits)==false)&&
             (self._get_bits(PTEFlags::X.bits)==false));
     }
     fn is_not_leaf(&self)->bool{
@@ -308,7 +333,7 @@ impl PTE {
         self.pnn2 = ((np>>18)&0x1FF) as u16;
     }
     fn get_point_paddr(& self)->usize{
-        return ((self.pnn0 as usize)|((self.pnn1<<9) as usize)|((self.pnn2<<18) as usize))<<12;
+        return ((self.pnn0 as usize)|((self.pnn1 as usize) <<9)|((self.pnn2 as usize)<<18))<<12;
     }
 }
 
@@ -316,9 +341,9 @@ pub fn create_kernel_pagetable()->PageTable{
     let kernel_pagetable_root = boot_pagetable as usize;
     // this page is not in PAGE_MANAGER.
     let mut pg = Page::default();
-    pg.__set_pfn(PFN(kernel_pagetable_root));
+    pg.__set_pfn(PFN::from(kernel_pagetable_root));
     let kp = PageTable{
-        private_pgs: vec![Arc::new(pg)]
+        private_pgs: SpinLock::new(vec![Arc::new(pg)])
     };
     return kp;
 }

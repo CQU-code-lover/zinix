@@ -1,19 +1,26 @@
 use alloc::collections::LinkedList;
 use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp::{max, min};
 use core::fmt::{Debug, Formatter};
+use xmas_elf::ElfFile;
+use xmas_elf::program::Type::Load;
 
-use crate::consts::PAGE_SIZE;
+use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET, USER_HEAP_SIZE_NR_PAGES, USER_SPACE_END, USER_SPACE_START, USER_STACK_MAX_ADDR, USER_STACK_SIZE_NR_PAGES};
 use crate::mm::addr::{Addr, PFN};
+use crate::mm::{alloc_one_page, alloc_pages};
+use crate::mm::aux::{AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_HWCAP, AT_NOTELF, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM, AT_SECURE, AT_UID, AuxHeader, make_auxv};
+use crate::mm::buddy::order2pages;
 use crate::mm::page::Page;
-use crate::mm::pagetable::PageTable;
-use crate::mm::vma::VMA;
+use crate::mm::pagetable::{PageTable, PTEFlags, WalkRet};
+use crate::mm::vma::{VMA, VMAFlags};
 
 const VMA_CACHE_MAX:usize = 10;
 
 pub struct MmStruct{
     vma_cache:VmaCache,
-    pagetable:PageTable,
+    pagetable:Arc<PageTable>,
     vmas : LinkedList<Arc<VMA>>
 }
 
@@ -33,10 +40,10 @@ pub struct VmaCache {
 }
 
 impl MmStruct {
-    pub fn new()->Self{
+    pub fn new_empty() ->Self{
         MmStruct{
             vma_cache: VmaCache::new(),
-            pagetable: PageTable::new_user(),
+            pagetable: Arc::new(PageTable::new_user()),
             vmas: Default::default()
         }
     }
@@ -77,6 +84,10 @@ impl MmStruct {
     // private func for insert vma.
     // not check if the vma is valid.
     pub fn _insert_vma(&mut self,vma:Arc<VMA>){
+        if self.vmas.is_empty() {
+            self.vmas.push_back(vma);
+            return;
+        }
         let mut cursor = self.vmas.cursor_front_mut();
         while match cursor.index() {
             Some(_)=>true,
@@ -90,11 +101,77 @@ impl MmStruct {
         }
         panic!("_insert_vma Bug");
     }
+    // arg len not check
+    fn _get_unmapped_area_assign(&mut self,len:usize,flags:u8,vaddr:Addr)->Option<Arc<VMA>>{
+        assert!(vaddr.is_align());
+        let mut ret :Option<Arc<VMA>> = None;
+        // todo! check mm range
+        if self.vmas.is_empty() {
+            return  Some(VMA::new(
+                vaddr,
+                vaddr+Addr(len),
+                self.pagetable.clone(),
+                flags,
+            ));
+        }
+        let mut cursor = self.vmas.cursor_front_mut();
+        while match cursor.index() {
+            Some(_)=>true,
+            None=>false
+        }{
+            let cur = cursor.current().unwrap();
+            if cur.in_vma(vaddr) {
+                break;
+            }
+            match cursor.peek_next() {
+                None => {
+                    // cur is last node
+                    // todo check Mm range
+                    ret = Some(VMA::new(
+                        vaddr,
+                        vaddr+Addr(len),
+                        self.pagetable.clone(),
+                        flags,
+                    ));
+                    break;
+                }
+                Some(next) => {
+                    if next.get_start_addr()>vaddr{
+                        // have found a valid hole
+                        if (next.get_start_addr()-vaddr).0 >=len {
+                            ret = Some(VMA::new(
+                                vaddr,
+                                vaddr+Addr(len),
+                                self.pagetable.clone(),
+                                flags
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+            cursor.move_next();
+        }
+        ret
+    }
+
     // must page align
-    pub fn get_unmapped_area(&mut self,len:usize,flags:u8)->Option<Arc<VMA>>{
+    pub fn get_unmapped_area(&mut self,len:usize,flags:u8,vaddr:Option<Addr>)->Option<Arc<VMA>>{
         // check len
         if len%PAGE_SIZE!=0{
             panic!("get_unmapped_area fail, len is not page align");
+        }
+
+        if vaddr.is_some(){
+            return self._get_unmapped_area_assign(len,flags,vaddr.unwrap());
+        }
+        if self.vmas.is_empty() {
+            return  Some(VMA::new(
+                Addr(USER_SPACE_START),
+                Addr(USER_SPACE_START)+Addr(len),
+                self.pagetable.clone(),
+                flags,
+            ));
         }
         let mut ret :Option<Arc<VMA>> = None;
         let mut cursor = self.vmas.cursor_front_mut();
@@ -111,6 +188,7 @@ impl MmStruct {
                     ret = Some(VMA::new(
                         cur_end_addr,
                         cur_end_addr+Addr(len),
+                        self.pagetable.clone(),
                         flags
                     ));
                     break;
@@ -121,6 +199,7 @@ impl MmStruct {
                         ret = Some(VMA::new(
                             cur_end_addr,
                             cur_end_addr+Addr(len),
+                            self.pagetable.clone(),
                             flags
                         ));
                         break;
@@ -130,6 +209,179 @@ impl MmStruct {
             cursor.move_next();
         }
         ret
+    }
+    pub fn get_unmapped_area_and_insert(&mut self,len:usize,flags:u8,vaddr:Option<Addr>,data:Option<&[u8]>,offset :usize)->Option<Arc<VMA>>{
+        let vma = self.get_unmapped_area(len,flags,vaddr).map(|x|{
+            self._insert_vma(x.clone());
+            x
+        });
+        if data.is_some() {
+            let s = vma.as_ref().unwrap().get_start_addr();
+            let mut pos:usize = 0;
+            let data_inner = data.unwrap();
+            let mut first_pg = true;
+            for i in s.page_iter(Addr(data_inner.len()).ceil().0){
+                self.alloc_phy_pages_check(i,0,|addr,len|{
+                    let write_buf = &data_inner[pos..];
+                    let real_write =  if first_pg {
+                        PAGE_SIZE-offset
+                    } else {
+                        min(PAGE_SIZE,write_buf.len())
+                    };
+                    for j in 0..real_write{
+                        unsafe {
+                            *((addr.0+j) as *mut u8) = write_buf[j];
+                        }
+                    }
+                });
+                if first_pg {
+                    pos += (PAGE_SIZE-offset);
+                    first_pg = false;
+                } else {
+                    pos += PAGE_SIZE;
+                }
+                if pos>=data_inner.len(){
+                    break;
+                }
+            }
+        }
+        vma
+    }
+    pub fn alloc_phy_pages_no_check<F>(&mut self, vaddr:Addr,order:usize,f:F) ->Result<(),isize>
+    where
+        F:FnOnce(Addr,usize)->()
+    {
+        if !vaddr.is_align() {
+            return Err(-1);
+        }
+        let page_cnt = order2pages(order);
+        if page_cnt==0 {
+            return Err(-1);
+        }
+        match self.find_vma(vaddr) {
+            None => {
+                // vma is not allocated for this vaddr
+                Err(-1)
+            }
+            Some(vma) => {
+                let pages = alloc_pages(order).unwrap();
+                let mut paddr:Addr = pages.get_pfn().into();
+                paddr = Addr(paddr.get_paddr());
+                f(paddr,page_cnt*PAGE_SIZE);
+                vma.map_pages(pages,vaddr);
+                Ok(())
+            }
+        }
+    }
+    pub fn alloc_phy_pages_check<F>(&mut self, vaddr:Addr,order:usize,f:F) ->Result<(),isize>
+    where
+        F:FnOnce(Addr,usize)->()
+    {
+        match self.pagetable.walk(vaddr.0){
+            None => {
+                // ok
+                self.alloc_phy_pages_no_check(vaddr,order,f)
+            }
+            Some(walk) => {
+                // last level
+                if walk.get_level()==2 {
+                    // ok
+                    self.alloc_phy_pages_no_check(vaddr,order,f)
+                } else {
+                    // big page
+                    Err(-1)
+                }
+            }
+        }
+    }
+    // 只能在页表已经install的时候使用
+    pub unsafe fn flush(&self){
+        self.pagetable.flush_self();
+    }
+    pub fn new_from_elf(elf_bytes:&[u8]) ->(Self, Vec<AuxHeader>){
+        let mut mm = Self::new_empty();
+        let elf = ElfFile::new(elf_bytes).unwrap();
+        assert_eq!([0x7f, 0x45, 0x4c, 0x46],elf.header.pt1.magic);
+        let mut head_va:usize = 0;
+        let mut load_end = Addr(0);
+        for ph in elf.program_iter() {
+            if ph.get_type().unwrap() == Load {
+                let mut s_addr = Addr(ph.virtual_addr() as usize);
+                let offset = (s_addr-s_addr.floor()).0;
+                // align start addr
+                s_addr = s_addr.floor();
+                if offset == 0{
+                    head_va = s_addr.0;
+                }
+                let size_aligned = Addr(ph.mem_size() as usize + offset).ceil().0;
+                let ph_flags = ph.flags();
+                let mut vma_flags:u8 = VMAFlags::VM_USER.bits();
+                if ph_flags.is_read() {
+                    vma_flags|=VMAFlags::VM_READ.bits();
+                }
+                if ph_flags.is_write() {
+                    vma_flags|=VMAFlags::VM_WRITE.bits();
+                }
+                if ph_flags.is_execute() {
+                    vma_flags|=VMAFlags::VM_EXEC.bits();
+                }
+                let area = mm.get_unmapped_area_and_insert(
+                    size_aligned,
+                    vma_flags,
+                    Some(s_addr),
+                    Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                    offset
+                ).unwrap();
+                load_end = max(load_end,area.get_end_addr());
+            }
+        }
+
+        // heap
+        let heap_start = load_end.ceil()+Addr(PAGE_SIZE);
+        mm.get_unmapped_area_and_insert(
+            USER_HEAP_SIZE_NR_PAGES*PAGE_SIZE,
+            VMAFlags::VM_READ.bits()|VMAFlags::VM_WRITE.bits()|VMAFlags::VM_USER.bits(),
+            Some(heap_start),
+            None,
+            0
+        ).unwrap();
+        mm.alloc_phy_pages_check(heap_start,4,
+                                 |x,y| {}
+        );
+
+        mm.get_unmapped_area_and_insert(
+            USER_STACK_SIZE_NR_PAGES*PAGE_SIZE,
+            VMAFlags::VM_READ.bits()|VMAFlags::VM_WRITE.bits()|VMAFlags::VM_USER.bits(),
+            Some(Addr(USER_STACK_MAX_ADDR-(USER_STACK_SIZE_NR_PAGES*PAGE_SIZE))),
+            None,
+            0
+        ).unwrap();
+        // alloc all phy page for user stack
+        mm.alloc_phy_pages_check(Addr(USER_STACK_MAX_ADDR-(USER_STACK_SIZE_NR_PAGES*PAGE_SIZE)),4,
+        |x,y| {}
+        );
+
+        let mut auxv = Vec::new();
+
+        let ph_head_addr = head_va + elf.header.pt2.ph_offset() as usize;
+        auxv.push(AuxHeader{aux_type: AT_PHENT, value: elf.header.pt2.ph_entry_size() as usize});// ELF64 header 64bytes
+        auxv.push(AuxHeader{aux_type: AT_PHNUM, value: elf.header.pt2.ph_count() as usize});
+        auxv.push(AuxHeader{aux_type: AT_PAGESZ, value: PAGE_SIZE as usize});
+        auxv.push(AuxHeader{aux_type: AT_BASE, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_FLAGS, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_ENTRY, value: elf.header.pt2.entry_point() as usize});
+        auxv.push(AuxHeader{aux_type: AT_UID, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_EUID, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_GID, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_EGID, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_PLATFORM, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_HWCAP, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_CLKTCK, value: 100 as usize});
+        auxv.push(AuxHeader{aux_type: AT_SECURE, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_NOTELF, value: 0x112d as usize});
+        auxv.push(AuxHeader{aux_type: AT_PHDR, value: ph_head_addr as usize});
+
+        (mm,auxv)
     }
 }
 

@@ -11,9 +11,9 @@ use core::pin::Pin;
 
 use log::set_max_level;
 
-use crate::{println, SpinLock};
+use crate::{println, SpinLock, trace_sync};
 use crate::consts::PAGE_SIZE;
-use crate::mm::_insert_area_for_page_drop;
+use crate::mm::{_insert_area_for_page_drop, trace_global_buddy};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::buddy::order2pages;
 use crate::sync::SpinLockGuard;
@@ -78,8 +78,8 @@ impl PagesManager {
             match &self.pages[i] {
                 Some(weak_ptr) => {
                     match  weak_ptr.upgrade() {
-                        Some(_)=> {
-                            panic!("page already in memory");
+                        Some(must_none_pg)=> {
+                            panic!("page already in memory: {:#X}",must_none_pg.get_pfn().0);
                         }
                         _ => {
 
@@ -91,7 +91,9 @@ impl PagesManager {
                 }
             }
             // alloc page from mem
-            let new_pg = Page::new(pfn_probe);
+            let new_pg = Page::new(pfn_probe,
+                if i==index{ true } else { false }
+            );
             if i == index {
                 new_pg.set_order(order);
                 ret = new_pg.clone();
@@ -101,7 +103,8 @@ impl PagesManager {
             self.pages[i] = Some(Arc::downgrade(&new_pg));
             pfn_probe.step_one();
         }
-        println!("alloc ok");
+        trace_sync!("Alloc Page PFN={:#X},order={}",ret.get_pfn().0,order);
+        trace_global_buddy();
         ret
     }
     pub fn get_page_arc(&self,pfn:PFN)->Option<Arc<Page>>{
@@ -123,6 +126,7 @@ impl PagesManager {
 pub struct Page{
     pfn:PFN,
     default_flag:bool,
+    is_leader_flag:bool,
     inner:SpinLock<PageMutInner>
 }
 
@@ -164,6 +168,7 @@ impl Default for Page {
         Page{
             pfn: PFN(0),
             default_flag:true,
+            is_leader_flag: true,
             inner: SpinLock::new(PageMutInner {
                 friends: Default::default(),
                 leader: Default::default(),
@@ -213,10 +218,11 @@ impl Default for Page {
 // }
 
 impl Page {
-    pub fn new(pfn:PFN)->Arc<Self>{
+    pub fn new(pfn:PFN,is_leader:bool)->Arc<Self>{
         let pg = Page{
             pfn:pfn,
             default_flag:false,
+            is_leader_flag: is_leader,
             inner: SpinLock::new(PageMutInner {
                 friends: LinkedList::new(),
                 leader: Weak::default(),
@@ -253,6 +259,7 @@ impl Page {
         page.inner.lock().unwrap().change_leader(Arc::downgrade(&self.get_leader()));
         self.inner.lock().unwrap().friends.push_back(page);
     }
+    // can`t use in page`s Drop
     pub fn get_leader(&self)->Arc<Page>{
         self.inner.lock().unwrap().leader.upgrade().unwrap()
     }
@@ -269,9 +276,11 @@ impl Page {
     pub fn get_pfn(&self)->PFN {
         self.pfn
     }
+    // can`t use in page`s Drop
     pub fn is_leader(&self)->bool {
-        self.get_leader().pfn == self.get_pfn()
+        self.is_leader_flag
     }
+
     // pub fn iter(&self)->PageInterator{
     //     PageInterator::new(self)
     // }
@@ -305,9 +314,9 @@ impl Page {
 impl Drop for Page {
     fn drop(&mut self) {
         if !self.default_flag {
-            println!("drop page PFN: {}", self.pfn.0);
+            trace_sync!("drop page PFN: {:#X}, leader:{},order={}", self.pfn.0,self.is_leader(),self.get_order());
             // drop for area..
-            if self.get_leader().pfn == self.pfn {
+            if self.is_leader() {
                 // is leader, push back free area
                 let order = self.get_order();
                 match _insert_area_for_page_drop(self.pfn,order) {

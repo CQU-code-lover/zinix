@@ -1,6 +1,8 @@
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Splice;
+use alloc::vec;
+use alloc::vec::{Splice, Vec};
 use core::cell::RefCell;
+use core::default::default;
 use core::mem::size_of;
 use log::error;
 use crate::asm::{r_sp, r_sstatus, r_tp, SSTATUS_SIE, SSTATUS_SPIE, SSTATUS_SPP};
@@ -11,9 +13,13 @@ use crate::{error_sync, SpinLock};
 use crate::task::{add_task, generate_tid};
 use crate::task::stack::Stack;
 use riscv::register::*;
+use xmas_elf::symbol_table::Visibility::Default;
+use crate::fs::dfile::DFile;
 use crate::sbi::shutdown;
 use crate::task::task::TaskStatus::TaskRunning;
 use crate::trap::TrapFrame;
+
+const MAX_OPENED:usize = 64;
 
 extern "C" {
     fn switch_context(cur: *const TaskContext, next: *const TaskContext);
@@ -119,6 +125,7 @@ pub struct Task {
     parent: Option<Weak<SpinLock<Task>>>,
     status: TaskStatus,
     mm: Option<MmStruct>,
+    opened: Vec<Option<Arc<DFile>>>
 }
 
 impl Task {
@@ -144,7 +151,8 @@ impl Task {
             context: TaskContext::new(),
             parent: None,
             status: TaskStatus::TaskRunning,
-            mm: None
+            mm: None,
+            opened: vec![None;MAX_OPENED]
         };
         sscratch::write(0);
         unsafe {
@@ -173,7 +181,8 @@ impl Task {
             context: TaskContext::new(),
             parent: None,
             status: TaskStatus::TaskRunning,
-            mm: None
+            mm: None,
+            opened:vec![None;MAX_OPENED]
         };
         tsk.context.ra = p_fn as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }

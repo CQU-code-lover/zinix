@@ -1,4 +1,6 @@
 use alloc::string::ToString;
+use core::arch::global_asm;
+use core::arch::asm;
 use crate::println;
 
 global_asm!(include_str!("riscv.asm"));
@@ -48,6 +50,14 @@ pub fn r_sstatus()->usize {
     let mut val:usize = 0;
     unsafe {
         asm!("csrr {},sstatus", out(reg) val);
+    }
+    val
+}
+
+pub fn r_stval()->usize {
+    let mut val:usize = 0;
+    unsafe {
+        asm!("csrr {},stval", out(reg) val);
     }
     val
 }
