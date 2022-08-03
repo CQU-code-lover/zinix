@@ -5,15 +5,18 @@ use core::fmt::{Debug, Formatter};
 use core::mem::size_of;
 use log::debug;
 use riscv::register::{sie, sstatus, stvec, scause};
-use riscv::register::scause::{Exception, Interrupt, Trap};
+use riscv::register::scause::{Exception, Interrupt, Scause, Trap};
 use riscv::register::stvec::TrapMode;
 use crate::{debug_sync, println};
-use crate::asm::{disable_irq, enable_irq, r_stval};
+use crate::asm::{disable_irq, enable_irq, r_scause, r_stval};
+use crate::consts::PHY_MEM_OFFSET;
+use crate::mm::get_kernel_pagetable;
+use crate::mm::pagetable::PTEFlags;
 use crate::sbi::shutdown;
 use crate::syscall::syscall_entry;
-use crate::task::task::RUNNING_TASK;
+use crate::task::task::{get_running, RUNNING_TASK};
 use crate::trap::timer::timer_entry;
-use crate::utils::memcpy;
+use crate::utils::{memcpy, set_usize_by_addr};
 global_asm!(include_str!("trap_asm.s"));
 
 #[repr(C)]
@@ -115,7 +118,16 @@ impl TrapFrame {
     }
     pub unsafe fn write_to(&mut self,addr:usize){
         let len = size_of::<Self>();
-        memcpy( self as *mut TrapFrame as usize,addr,len);
+        memcpy( addr,self as *mut TrapFrame as usize,len);
+    }
+    pub fn ok(&mut self){
+        self.x10 = 0;
+    }
+    pub fn ret(&mut self,val:usize){
+        self.x10 = val;
+    }
+    pub fn err(&mut self){
+        self.x10 = (-1 as i64) as usize;
     }
 }
 
@@ -156,47 +168,67 @@ fn irq_handler(trap_frame:&mut TrapFrame){
 #[no_mangle]
 fn exc_handler(trap_frame:&mut TrapFrame){
     let irq_state = disable_irq();
-    unsafe { RUNNING_TASK().lock().unwrap().check_magic(); }
     debug_sync!("EXC\n{:?}",trap_frame);
     debug_sync!("sstval:{:#X}",r_stval());
+    debug_sync!("scause:{:#X}",r_scause());
+    unsafe { RUNNING_TASK().lock().unwrap().check_magic(); }
     match scause::read().cause() {
         Trap::Exception(exc) => {
-            match exc {
-                Exception::InstructionMisaligned => {
-                    todo!()
-                }
-                Exception::InstructionFault => {
-                    todo!()
-                }
-                Exception::IllegalInstruction => {
-                    todo!()
-                }
-                Exception::Breakpoint => {
-                    todo!()
-                }
-                Exception::LoadFault => {
-                    todo!()
-                }
-                Exception::StoreMisaligned => {
-                    todo!()
-                }
-                Exception::StoreFault => {
-                    todo!()
-                }
-                Exception::UserEnvCall => {
-                    syscall_entry(trap_frame)
-                }
-                Exception::InstructionPageFault => {
-                    todo!()
-                }
-                Exception::LoadPageFault => {
-                    todo!()
-                }
-                Exception::StorePageFault => {
-                    todo!()
-                }
-                Exception::Unknown => {
-                    panic!("unrecognized exception");
+            unsafe {
+                match exc {
+                    Exception::InstructionMisaligned => {
+                        todo!()
+                    }
+                    Exception::InstructionFault => {
+                        todo!()
+                    }
+                    Exception::IllegalInstruction => {
+                        todo!()
+                    }
+                    Exception::Breakpoint => {
+                        todo!()
+                    }
+                    Exception::LoadFault => {
+                        todo!()
+                    }
+                    Exception::StoreMisaligned => {
+                        todo!()
+                    }
+                    Exception::StoreFault => {
+                        todo!()
+                    }
+                    Exception::UserEnvCall => {
+                        syscall_entry(trap_frame);
+                        trap_frame.sepc+=4;
+                    }
+                    Exception::InstructionPageFault => {
+                        let mut pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
+                        println!("{:#b}", pte.flags);
+                        // pte.flags|=PTEFlags::A.bits();
+                        // set_usize_by_addr(pte.get_point_paddr()+PHY_MEM_OFFSET,pte.into());
+                        unsafe {
+                            // get_running().lock().unwrap().install_pagetable();
+                            let v = *(trap_frame.sepc as *const usize);
+                            // println!("ins = {:#X}", v);
+                        }
+                        pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
+                        println!("{:#b}", pte.flags);
+                    }
+                    Exception::LoadPageFault => {
+                        let vaddr = r_stval();
+                        let pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte();
+                        println!("{:#b}", pte.flags);
+                        panic!("load pg fault");
+                    }
+                    Exception::StorePageFault => {
+                        let vaddr = r_stval();
+                        let pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte();
+                        println!("{:#b}", pte.flags);
+                        panic!("store pg fault");
+                    }
+                    Exception::Unknown => {
+                        panic!("unrecognized exception");
+                    }
                 }
             }
         }

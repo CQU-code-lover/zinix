@@ -48,9 +48,8 @@ clear_bss:
 clear_bss_done:
 
 # 设置栈
-# todo：为栈添加magic number用于检测溢出
     add t0, a0, 1
-    slli t0, t0, 14
+    slli t0, t0, 15
     la sp, boot_stack
     add sp, sp, t0
 
@@ -139,7 +138,7 @@ reset_regs:
     .section .bss.stack
     .align 12
 boot_stack:
-    .space 4096 * 4 * 2
+    .space 4096 * 8 * 2
     .globl boot_stack_top
 boot_stack_top:
 
@@ -151,11 +150,9 @@ boot_stack_top:
     .align 12
     .global boot_pagetable
 boot_pagetable:
-    .quad (0 << 10) | 0xcf
-    .quad (0x40000 << 10) | 0xcf
+    .quad (0 << 10) | 0xcf # VRWXAD
+    .zero 8 * 1
     .quad (0x80000 << 10) | 0xcf # VRWXAD
-    .zero 8 * 349
-    .quad (0 << 10) | 0xcf
-    .quad (0x40000 << 10) | 0xcf
+    .zero 8 * 351
     .quad (0x80000 << 10) | 0xcf # VRWXAD
     .zero 8 * 157

@@ -14,7 +14,8 @@ use crate::{error_sync, println, SpinLock};
 use crate::mm::mm::MmStruct;
 use crate::mm::pagetable::PageTable;
 use crate::sbi::shutdown;
-use crate::task::task::{set_running, Task, TaskContext};
+use crate::task::task::{get_running, set_running, Task, TaskContext, TaskStatus};
+use crate::task::task::TaskStatus::TaskZombie;
 
 pub(crate) mod task;
 pub(crate) mod stack;
@@ -32,6 +33,7 @@ lazy_static! {
     static ref g_tid:AtomicUsize = AtomicUsize::new(1);
     static ref running_list : SpinLock<LinkedList<Arc<SpinLock<Task>>>> = SpinLock::new(LinkedList::new());
     static ref sleep_list : SpinLock<LinkedList<Arc<SpinLock<Task>>>> = SpinLock::new(LinkedList::new());
+    static ref exit_list : SpinLock<LinkedList<Arc<SpinLock<Task>>>> = SpinLock::new(LinkedList::new());
 }
 
 fn generate_tid() -> usize {
@@ -46,25 +48,58 @@ pub fn add_task(task: Arc<SpinLock<Task>>) {
     running_list.lock().unwrap().push_back(task);
 }
 
+pub fn exit_self(){
+    let this_task = get_running();
+    this_task.lock_irq().unwrap().set_status(TaskZombie);
+    scheduler();
+}
+
 pub fn get_task() -> Arc<SpinLock<Task>> {
     running_list.lock().unwrap().pop_front().unwrap()
 }
 
 pub fn scheduler() {
     let mut rs = running_list.lock().unwrap();
-    if rs.len() == 0 {
-        error_sync!("Bug");
-    }
+    // bug raise
+    assert_ne!(rs.len(), 0);
+    let current = get_running();
+    // todo 实现idle
     if rs.len() == 1 {
-        return;
+        match current.lock_irq().unwrap().get_status() {
+            TaskStatus::TaskRunning => {
+                return;
+            }
+            _ => {
+                // idle
+                todo!()
+            }
+        }
     }
-    let current = rs.pop_front().unwrap();
-    rs.push_back(current.clone());
+    // pop running task
+    rs.pop_front();
+    match current.lock_irq().unwrap().get_status() {
+        TaskStatus::TaskRunning => {
+            rs.push_back(current.clone());
+        }
+        TaskStatus::TaskSleeping => {
+            sleep_list.lock_irq().unwrap().push_back(current.clone());
+        }
+        TaskStatus::TaskZombie => {
+            exit_list.lock_irq().unwrap().push_back(current.clone());
+        }
+    }
     let next_running = rs.front().unwrap();
     let ctx_cur = current.lock().unwrap().get_ctx_mut_ref() as *const TaskContext;
     let ctx_next = next_running.lock().unwrap().get_ctx_mut_ref() as *const TaskContext;
     set_running(next_running.clone());
+    let next_locked = next_running.lock_irq().unwrap();
+    if next_locked.is_user() {
+        // install pagetable
+        unsafe { next_locked.install_pagetable(); }
+    }
+    drop(next_locked);
     drop(rs);
+
     unsafe {
         switch_context(ctx_cur, ctx_next);
     }

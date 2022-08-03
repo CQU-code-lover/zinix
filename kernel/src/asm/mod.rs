@@ -62,6 +62,20 @@ pub fn r_stval()->usize {
     val
 }
 
+pub fn r_scause()->usize {
+    let mut val:usize = 0;
+    unsafe {
+        asm!("csrr {},scause", out(reg) val);
+    }
+    val
+}
+
+pub fn w_satp(val:usize){
+    unsafe {
+        asm!("csrw satp,{}", in(reg) val);
+    }
+}
+
 pub fn r_tp()->usize{
     let mut tp:usize = 0;
     unsafe {

@@ -8,7 +8,7 @@ use crate::mm::addr::Addr;
 use crate::mm::buddy::order2pages;
 use crate::mm::mm::MmStruct;
 use crate::mm::page::Page;
-use crate::mm::pagetable::PageTable;
+use crate::mm::pagetable::{PageTable, PTEFlags};
 use crate::SpinLock;
 
 bitflags! {
@@ -16,8 +16,8 @@ bitflags! {
         const VM_READ = 1 << 0;
         const VM_WRITE = 1 << 1;
         const VM_EXEC = 1 << 2;
-        const VM_SHARD = 1 << 3;
-        const VM_USER = 1<<4;
+        const VM_USER = 1<<3;
+        const VM_SHARD = 1 << 4;
     }
 }
 
@@ -55,7 +55,9 @@ impl Default for VMA {
     }
 }
 
-fn _vma_flags_2_pte_flags(f:u8)->u8{0}
+fn _vma_flags_2_pte_flags(f:u8)->u8{
+    (f<<1)|PTEFlags::V.bits()
+}
 
 impl VMA {
     pub fn new(start_addr:Addr,end_addr:Addr,pagetable:Arc<PageTable>,flags:u8)->Arc<Self>{

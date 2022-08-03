@@ -11,7 +11,7 @@ use crate::mm::page::Page;
 use crate::{info_sync, println, SpinLock};
 
 #[allow(unused)]
-const VIRTIO0: usize = 0x10001000+PHY_MEM_OFFSET;
+const VIRTIO0: usize = 0x10001000;
 
 pub struct VirtioDev {
     inner:SpinLock<VirtIOBlk<'static>>

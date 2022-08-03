@@ -80,7 +80,6 @@ impl<T:BlockReadWrite> IoBase for BlkStorage<T> { type Error = (); }
 
 impl<T:BlockReadWrite> fatfs::Read for BlkStorage<T>{
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        debug_sync!("READ");
         let mut pos = self.pos as usize;
         let read_max = pos+buf.len();
         let mut read_pos:usize = 0;
@@ -135,7 +134,6 @@ impl<T:BlockReadWrite> fatfs::Seek for BlkStorage<T> {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
         match pos {
             SeekFrom::Start(off) => {
-                debug_sync!("seek start {}",off);
                 self.pos = off;
             }
             SeekFrom::End(off) => {

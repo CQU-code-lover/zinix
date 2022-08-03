@@ -85,10 +85,10 @@ impl<T:?Sized> Drop for SpinLockGuard<'_,T>{
     }
 }
 
-impl<T:?Sized> Deref for SpinLockGuard<'_,T> {
+impl<'a,T:?Sized> Deref for SpinLockGuard<'a,T> {
     type Target = T;
 
-    fn deref(&self) -> &T {
+    fn deref<'b>(&'b self) -> &'b T {
         unsafe {&*self.spinlock.data.get()}
     }
 }

@@ -14,10 +14,12 @@ use page::PagesManager;
 use pagetable::create_kernel_pagetable;
 use pagetable::PageTable;
 
-use crate::{consts, info_sync, SpinLock, trace_sync};
-use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_START};
+use crate::{consts, info_sync, println, SpinLock, trace_sync};
+use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, PHY_MEM_START};
 use crate::mm::addr::{Addr, PFN};
 use crate::mm::page::Page;
+use crate::mm::pagetable::{PTE, PTEFlags};
+use crate::sbi::shutdown;
 use crate::sync::SpinLockGuard;
 use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
 
@@ -28,7 +30,7 @@ pub(crate) mod bitmap;
 pub(crate) mod pagetable;
 pub(crate) mod vma;
 pub(crate) mod mm;
-mod aux;
+pub(crate) mod aux;
 
 const k210_mem_mb:u32 = 6;
 const qemu_mem_mb:u32 = 6;
@@ -57,6 +59,10 @@ lazy_static!{
     static ref PAGES_MANAGER:SpinLock<PagesManager> = SpinLock::new(Default::default());
 }
 
+pub unsafe fn kernel_pagetable_flush(){
+    KERNEL_PAGETABLE.lock().unwrap().flush_self();
+}
+
 pub fn trace_global_buddy(){
     let b:&BuddyAllocator = &*BUDDY_ALLOCATOR.lock_irq().unwrap();
     trace_sync!("{:?}",b);
@@ -72,6 +78,20 @@ fn page_init(start_addr:Addr, end_addr:Addr){
 
 fn buddy_init(start_addr:Addr,end_addr:Addr){
     BUDDY_ALLOCATOR.lock().unwrap().init(start_addr,end_addr);
+}
+
+const VIRT_ADDR:usize = 0x10001000;
+
+fn hardware_address_map_init(){
+    let lock = KERNEL_PAGETABLE.lock().unwrap();
+    let flags = PTEFlags::V.bits()| PTEFlags::R.bits()| PTEFlags::W.bits()| PTEFlags::X.bits();
+    #[cfg(feature = "qemu")]
+    {
+        for i in 0x10001..0x10300{
+           lock._force_map_one(0+PAGE_SIZE*i, 0+PAGE_SIZE*i,0xcf);
+        }
+    }
+    trace_sync!("map virt ok");
 }
 
 pub fn _insert_area_for_page_drop(pfn:PFN,order:usize)->Result<(),isize>{
@@ -94,6 +114,7 @@ pub fn mm_init(){
     e_addr = e_addr.floor();
     buddy_init(s_addr,e_addr);
     page_init(s_addr,e_addr);
+    hardware_address_map_init();
 }
 
 pub fn alloc_pages(order:usize)->Option<Arc<Page>>{

@@ -9,18 +9,20 @@ use xmas_elf::program::Type::Load;
 
 use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET, USER_HEAP_SIZE_NR_PAGES, USER_SPACE_END, USER_SPACE_START, USER_STACK_MAX_ADDR, USER_STACK_SIZE_NR_PAGES};
 use crate::mm::addr::{Addr, PFN};
-use crate::mm::{alloc_one_page, alloc_pages};
-use crate::mm::aux::{AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_HWCAP, AT_NOTELF, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM, AT_SECURE, AT_UID, AuxHeader, make_auxv};
+use crate::mm::{alloc_one_page, alloc_pages, get_kernel_pagetable};
+use crate::mm::aux::{AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_HWCAP, AT_NOTELF, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM, AT_SECURE, AT_UID, AuxHeader, make_auxv};
 use crate::mm::buddy::order2pages;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{PageTable, PTEFlags, WalkRet};
 use crate::mm::vma::{VMA, VMAFlags};
+use crate::println;
+use crate::sbi::shutdown;
 
 const VMA_CACHE_MAX:usize = 10;
 
 pub struct MmStruct{
     vma_cache:VmaCache,
-    pagetable:Arc<PageTable>,
+    pub pagetable:Arc<PageTable>,
     vmas : LinkedList<Arc<VMA>>
 }
 
@@ -220,22 +222,24 @@ impl MmStruct {
             let mut pos:usize = 0;
             let data_inner = data.unwrap();
             let mut first_pg = true;
-            for i in s.page_iter(Addr(data_inner.len()).ceil().0){
+            let mut in_page_offset = offset;
+            for i in s.page_iter(Addr(data_inner.len()+offset).ceil().0){
                 self.alloc_phy_pages_check(i,0,|addr,len|{
                     let write_buf = &data_inner[pos..];
                     let real_write =  if first_pg {
-                        PAGE_SIZE-offset
+                        min(PAGE_SIZE-offset,write_buf.len())
                     } else {
                         min(PAGE_SIZE,write_buf.len())
                     };
                     for j in 0..real_write{
                         unsafe {
-                            *((addr.0+j) as *mut u8) = write_buf[j];
+                            *((addr.0+in_page_offset+j) as *mut u8) = write_buf[j];
                         }
                     }
                 });
+                in_page_offset =0;
                 if first_pg {
-                    pos += (PAGE_SIZE-offset);
+                    pos += PAGE_SIZE-offset;
                     first_pg = false;
                 } else {
                     pos += PAGE_SIZE;
@@ -265,10 +269,9 @@ impl MmStruct {
             }
             Some(vma) => {
                 let pages = alloc_pages(order).unwrap();
-                let mut paddr:Addr = pages.get_pfn().into();
-                paddr = Addr(paddr.get_paddr());
-                f(paddr,page_cnt*PAGE_SIZE);
-                vma.map_pages(pages,vaddr);
+                let allocated_pages_vaddr:Addr = pages.get_pfn().into();
+                f(allocated_pages_vaddr, page_cnt*PAGE_SIZE);
+                vma.map_pages(pages, vaddr);
                 Ok(())
             }
         }
@@ -298,12 +301,48 @@ impl MmStruct {
     pub unsafe fn flush(&self){
         self.pagetable.flush_self();
     }
-    pub fn new_from_elf(elf_bytes:&[u8]) ->(Self, Vec<AuxHeader>){
+    pub unsafe fn install_pagetable(&self){
+        self.pagetable.install();
+    }
+    pub fn new_from_elf(elf_bytes:&[u8]) ->(Self, Vec<AuxHeader>, usize){
         let mut mm = Self::new_empty();
         let elf = ElfFile::new(elf_bytes).unwrap();
-        assert_eq!([0x7f, 0x45, 0x4c, 0x46],elf.header.pt1.magic);
+        let elf_header = elf.header;
+        assert_eq!([0x7f, 0x45, 0x4c, 0x46],elf_header.pt1.magic);
+        let ph_count = elf_header.pt2.ph_count();
         let mut head_va:usize = 0;
         let mut load_end = Addr(0);
+
+        let entry = elf.header.pt2.entry_point();
+
+        let mut auxv = Vec::new();
+
+        auxv.push(AuxHeader{aux_type: AT_PHENT, value: elf.header.pt2.ph_entry_size() as usize});// ELF64 header 64bytes
+        // todo AT_PHNUM
+        auxv.push(AuxHeader{aux_type: AT_PHNUM, value: 0 as usize});
+
+        // auxv.push(AuxHeader{aux_type: AT_PHNUM, value: ph_count as usize});
+        auxv.push(AuxHeader{aux_type: AT_PAGESZ, value: PAGE_SIZE as usize});
+        auxv.push(AuxHeader{aux_type: AT_BASE, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_FLAGS, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_ENTRY, value: entry as usize});
+        auxv.push(AuxHeader{aux_type: AT_UID, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_EUID, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_GID, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_EGID, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_PLATFORM, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_HWCAP, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_CLKTCK, value: 100 as usize});
+        auxv.push(AuxHeader{aux_type: AT_SECURE, value: 0 as usize});
+        auxv.push(AuxHeader{aux_type: AT_NOTELF, value: 0x112d as usize});
+        let a = elf.header.pt2.ph_offset();
+
+        // todo AT_PHDR
+        // let ph_head_addr = head_va + elf.header.pt2.ph_offset() as usize;
+        // auxv.push(AuxHeader{aux_type: AT_PHDR, value: ph_head_addr as usize});
+        auxv.push(AuxHeader{aux_type: AT_NULL, value: 0 as usize});
+        let a1 = elf.header.pt2.entry_point();
+
         for ph in elf.program_iter() {
             if ph.get_type().unwrap() == Load {
                 let mut s_addr = Addr(ph.virtual_addr() as usize);
@@ -325,6 +364,7 @@ impl MmStruct {
                 if ph_flags.is_execute() {
                     vma_flags|=VMAFlags::VM_EXEC.bits();
                 }
+                let a2 = elf.header.pt2.entry_point();
                 let area = mm.get_unmapped_area_and_insert(
                     size_aligned,
                     vma_flags,
@@ -332,6 +372,7 @@ impl MmStruct {
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
                     offset
                 ).unwrap();
+
                 load_end = max(load_end,area.get_end_addr());
             }
         }
@@ -345,6 +386,7 @@ impl MmStruct {
             None,
             0
         ).unwrap();
+        // let re = get_kernel_pagetable().lock().unwrap().walk(0x3000).unwrap();
         mm.alloc_phy_pages_check(heap_start,4,
                                  |x,y| {}
         );
@@ -360,28 +402,7 @@ impl MmStruct {
         mm.alloc_phy_pages_check(Addr(USER_STACK_MAX_ADDR-(USER_STACK_SIZE_NR_PAGES*PAGE_SIZE)),4,
         |x,y| {}
         );
-
-        let mut auxv = Vec::new();
-
-        let ph_head_addr = head_va + elf.header.pt2.ph_offset() as usize;
-        auxv.push(AuxHeader{aux_type: AT_PHENT, value: elf.header.pt2.ph_entry_size() as usize});// ELF64 header 64bytes
-        auxv.push(AuxHeader{aux_type: AT_PHNUM, value: elf.header.pt2.ph_count() as usize});
-        auxv.push(AuxHeader{aux_type: AT_PAGESZ, value: PAGE_SIZE as usize});
-        auxv.push(AuxHeader{aux_type: AT_BASE, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_FLAGS, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_ENTRY, value: elf.header.pt2.entry_point() as usize});
-        auxv.push(AuxHeader{aux_type: AT_UID, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_EUID, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_GID, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_EGID, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_PLATFORM, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_HWCAP, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_CLKTCK, value: 100 as usize});
-        auxv.push(AuxHeader{aux_type: AT_SECURE, value: 0 as usize});
-        auxv.push(AuxHeader{aux_type: AT_NOTELF, value: 0x112d as usize});
-        auxv.push(AuxHeader{aux_type: AT_PHDR, value: ph_head_addr as usize});
-
-        (mm,auxv)
+        (mm,auxv,elf.header.pt2.entry_point() as usize)
     }
 }
 

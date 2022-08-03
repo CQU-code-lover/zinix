@@ -11,6 +11,7 @@
 #![feature(mixed_integer_ops)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
+#![allow(unused)]
 //trace_macros!(true);
 
 extern crate alloc;
@@ -79,21 +80,14 @@ fn start_kernel(cpu:usize,dev_tree:usize) {
     }
     let grd2 = lock.lock().unwrap();
     early_logger_init();
-    debug!("Debug");
-    info!("info");
-    trace!("trace");
-    warn!("warn");
-    println!("{:x}",stvec::read().bits());
-    println!("cpu {:?}",get_core_id());
     trap_init();
     mm_init();
     task_cpu_init();
     // task_test();
-    let s= r_sstatus();
-    println!("{:#X}",s);
     timer_startup();
     fat_init();
-    unsafe {    do_test();
+    unsafe {
+        do_test();
     }
     loop {
         // debug_sync!("MAIN");

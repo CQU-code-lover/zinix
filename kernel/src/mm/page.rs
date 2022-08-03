@@ -245,6 +245,7 @@ impl Page {
         }
     }
     pub fn clear_pages_block(&self){
+        self.clear_one_page();
         for v in self.inner.lock().unwrap().friends.iter(){
             v.clear_one_page();
         }
