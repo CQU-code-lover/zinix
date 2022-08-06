@@ -25,8 +25,8 @@ use crate::fs::dfile::DFILE_TYPE::DFTYPE_STDIN;
 use crate::fs::fat::get_fatfs;
 use crate::fs::get_dentry_from_dir;
 use crate::mm::{alloc_pages, get_kernel_pagetable};
-use crate::mm::addr::Addr;
-use crate::mm::buddy::pages2order;
+use crate::pre::InnerAccess;
+use crate::utils::{order2pages, pages2order};
 use crate::sbi::shutdown;
 use crate::task::task::TaskStatus::TaskRunning;
 use crate::trap::TrapFrame;
@@ -238,7 +238,8 @@ impl Task {
         assert!(file_len<0x400000);
         let mut f = wrapper.to_file();
         let pages = alloc_pages(pages2order((file_len/PAGE_SIZE)+1)).unwrap();
-        let ptr = pages.get_pfn().get_addr_usize() as *mut [u8;0x400000];
+        println!("order:{},len: {},vaddr: {:#X}=>{:#X}",pages.get_order(),file_len,pages.get_vaddr().0,(pages.get_vaddr()+order2pages(pages.get_order())*PAGE_SIZE).0);
+        let ptr = pages.get_vaddr().get_inner() as *mut [u8;0x400000];
         let read_buf = &mut *ptr;
         let mut cnt: usize = 0;
         loop {

@@ -37,7 +37,7 @@ pub fn get_dentry_from_dir<'a,'b>(in_dir:Dir<'a,BlkStorage<VirtioDev>, DefaultTi
                 wrapper.created = dir_entry.created();
                 wrapper.modified = dir_entry.modified();
                 let find_name = dir_entry.file_name();
-                if dir_entry.file_name().eq(&(*name).to_uppercase()){
+                if dir_entry.file_name().eq(&(*name)){
                     if dir_entry.is_dir(){
                         dir_probe = dir_entry.to_dir();
                     } else {

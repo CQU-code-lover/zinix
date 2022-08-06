@@ -9,147 +9,128 @@ use core::ops::Add;
 use log::{error, info, log_enabled, set_max_level, warn};
 use riscv::interrupt::free;
 
-use crate::{cpu_local, info_sync, println, SpinLock, trace_sync};
+use crate::{cpu_local, info_sync, println, SpinLock, trace_sync, utils};
 use crate::consts::{MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
-use crate::mm::addr::{Addr, PFN};
+use crate::mm::addr::{OldAddr, PageAlign, PFN, Vaddr};
 use crate::mm::bitmap::{Bitmap, bitmap_test};
 use crate::mm::page::Page;
+use crate::pre::InnerAccess;
 use crate::sbi::shutdown;
 
 pub struct BuddyItem {
-    first_page: PFN,
-    pg_cnt : usize
+    vaddr: Vaddr,
 }
 
 pub struct BuddyAllocator {
     free_areas:Vec<FreeArea>,
-    first_pfn : PFN
+    start_vaddr: Vaddr
 }
-
-pub fn order2pages(order:usize)->usize{
-    return if order < MAX_ORDER {
-        1 << order
-    } else {
-        0
-    }
-}
-
-pub fn pages2order(pages:usize)->usize{
-    for i in 0..MAX_ORDER{
-        if order2pages(i)>=pages{
-            return i;
-        }
-    }
-    error!("pg2order fail");
-    return MAX_ORDER;
-}
-
 
 impl Default for BuddyAllocator {
     fn default()->Self {
         return BuddyAllocator{
             free_areas: Vec::new(),
-            first_pfn : PFN::from(0)
+            start_vaddr: Vaddr(0)
         };
     }
 }
 
 impl BuddyAllocator{
-    pub fn free_pages_cnt(&self)-> usize{
+    pub fn get_free_pages_cnt(&self) -> usize{
         let mut pgs_cnt = 0;
         for i in 0..MAX_ORDER {
-            let pg = self.free_areas[i].free_cnt * order2pages(i);
+            let pg = self.free_areas[i].free_cnt * utils::order2pages(i);
             pgs_cnt += pg;
         }
         return pgs_cnt;
     }
-    fn _init_areas(&mut self,start_pfn:PFN,pg_cnt:usize){
-        self.first_pfn = start_pfn;
-        let mut pfn_probe = start_pfn;
-        let pfn_end = start_pfn.clone().step_n(pg_cnt);
+    fn _init_areas(&mut self, start_vaddr:Vaddr, pg_cnt:usize){
+        self.start_vaddr = start_vaddr;
+        let mut vaddr_probe = start_vaddr;
+        let vaddr_end = start_vaddr + pg_cnt*PAGE_SIZE;
         for _ in 0..MAX_ORDER {
             self.free_areas.push(FreeArea::default());
         }
         for i in (0..MAX_ORDER).rev() {
-            let free_area = & mut self.free_areas[i];
+            let free_area = &mut self.free_areas[i];
             free_area.order = i;
-            free_area.first_pfn = start_pfn;
-            let pgs = order2pages(i);
+            free_area.start_vaddr = start_vaddr;
+            let pgs = utils::order2pages(i);
             let mut bitmap_len = pg_cnt/pgs;
             if pg_cnt%pgs != 0{
                 bitmap_len += 1;
             }
             free_area.bitmap = Bitmap::new(bitmap_len);
-            while pfn_probe.clone().step_n(pgs) <= pfn_end {
-                match free_area.insert_area(BuddyItem{
-                    first_page: pfn_probe,
-                    pg_cnt:pgs
-                }) {
-                    Some(_) => {
-                        panic!("init free area fail!");
-                    }
-                    _ => {}
+            let mut cnt = 0;
+            for j in vaddr_probe.addr_iter((vaddr_end-vaddr_probe.get_inner()).get_inner(),pgs*PAGE_SIZE){
+                // 必须检查间隔距离大于pgs*PAGE_SIZE
+                if (vaddr_end - j.0).0 < pgs*PAGE_SIZE {
+                    break;
                 }
-                pfn_probe.step_n(pgs);
+                free_area.insert_area(BuddyItem{
+                    vaddr: j,
+                }).map(|_|{
+                    panic!("buddy init fail!");
+                });
+                cnt+=1;
             }
+            vaddr_probe += (pgs*PAGE_SIZE*cnt);
         }
     }
-    pub fn init(&mut self,s_addr:Addr,e_addr:Addr){
-        let ns_addr = s_addr.ceil();
-        let ne_addr = e_addr.floor();
-        let pg_cnt = (ne_addr - ns_addr).get_pg_cnt();
-        self._init_areas(PFN::from(ns_addr),pg_cnt);
+    pub fn init(&mut self, s_vaddr: Vaddr, e_vaddr: Vaddr){
+        let ns_addr = s_vaddr.ceil();
+        let ne_addr = e_vaddr.floor();
+        let pg_cnt = ((ne_addr - ns_addr.get_inner())/PAGE_SIZE).get_inner();
+        self._init_areas(ns_addr,pg_cnt);
     }
-    pub fn new(s_addr:Addr,e_addr:Addr)->BuddyAllocator{
+    pub fn new(s_vaddr: Vaddr, e_vaddr: Vaddr) ->BuddyAllocator{
         let mut b = BuddyAllocator::default();
-        b.init(s_addr,e_addr);
+        b.init(s_vaddr,e_vaddr);
         return b;
     }
-    pub fn alloc_area(&mut self, order:usize) ->Result<PFN,isize>{
-        if order>=MAX_ORDER{
-            return Err(-1);
+    pub fn alloc_area(&mut self, order:usize) ->Result<Vaddr,isize>{
+        if order >= MAX_ORDER {
+            Err(-1)
         } else {
             match self.free_areas[order].alloc_area() {
                 Ok(item) => {
                     // find one
-                    return Ok(item.first_page);
+                    Ok(item.vaddr)
                 }
                 _ => {
-                    match self.alloc_area(order+1) {
-                        Ok(pfn) => {
+                    match self.alloc_area(order + 1) {
+                        Ok(vaddr) => {
                             // alloc OK from high order
-                            let pgs = order2pages(order);
-                            let re_insert_pfn = pfn.clone().step_n(pgs);
-                            trace_sync!("reinsert buddy: (PFN,order) = ({:?}, {})",re_insert_pfn,order);
+                            let pgs = utils::order2pages(order);
+                            let re_insert_vaddr = vaddr.clone() + PAGE_SIZE*pgs;
+                            // trace_sync!("reinsert buddy: (PFN,order) = ({:?}, {})",re_insert_pfn,order);
                             let insert_ret = self.free_areas[order].insert_area(BuddyItem {
-                                first_page: re_insert_pfn,
-                                pg_cnt: pgs,
+                                vaddr: re_insert_vaddr,
                             });
                             assert!(insert_ret.is_none());
-                            return Ok(pfn);
+                            Ok(vaddr)
                         }
                         _ => {
-                            return Err(-1);
+                            Err(-1)
                         }
                     }
                 }
             }
         }
     }
-    pub fn free_area(&mut self, pfn:PFN, order:usize) ->Result<(),isize>{
+    pub fn free_area(&mut self, vaddr:Vaddr, order:usize) ->Result<(),isize>{
         // check order and align
         if order>=MAX_ORDER {
             return Err(-1);
         }
-        if (pfn - self.free_areas[order].first_pfn).0 % order2pages(order) !=0 {
+        if self.free_areas[order].start_vaddr > vaddr {
             return Err(-1);
         }
-        if (self.free_areas[order].first_pfn > pfn) {
+        if ((vaddr - self.free_areas[order].start_vaddr.0) % (PAGE_SIZE*utils::order2pages(order))).0 !=0 {
             return Err(-1);
         }
         let mut  buddy_item = BuddyItem{
-            first_page: pfn,
-            pg_cnt: order2pages(order)
+            vaddr,
         };
         for i in order..MAX_ORDER {
             match self.free_areas[i].insert_area(buddy_item) {
@@ -168,17 +149,17 @@ impl BuddyAllocator{
 impl Debug for BuddyAllocator {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         writeln!(f,"[BuddyAllocator Debug]");
-        writeln!(f,"Start Addr: {}",self.first_pfn.0 << PAGE_OFFSET);
+        writeln!(f,"Start Vaddr: {:#X}",self.start_vaddr.0);
         let mut pgs_cnt = 0;
         for i in 0..MAX_ORDER {
-            let pg = self.free_areas[i].free_cnt * order2pages(i);
+            let pg = self.free_areas[i].free_cnt * utils::order2pages(i);
             pgs_cnt += pg;
         }
         writeln!(f,"Freed Pages: {}", pgs_cnt);
         for i in 0..MAX_ORDER {
             write!(f,"Order{}: ",i);
             for j in &self.free_areas[i].list {
-                write!(f,"{:X}\t",j.first_page.0);
+                write!(f,"{:X}\t",j.vaddr.0);
             }
             writeln!(f,"");
         }
@@ -190,7 +171,7 @@ impl Debug for BuddyAllocator {
 pub struct FreeArea {
     list : LinkedList<BuddyItem>,
     bitmap: Bitmap,
-    first_pfn : PFN,
+    start_vaddr: Vaddr,
     free_cnt: usize,
     order: usize
 }
@@ -200,13 +181,13 @@ impl FreeArea {
         FreeArea{
             list: LinkedList::new(),
             bitmap: Bitmap::default(),
-            first_pfn: PFN(0),
+            start_vaddr: Vaddr(0),
             free_cnt: 0,
             order: 0
         }
     }
     fn len(&self)->usize{
-        return self.list.len();
+        self.free_cnt
     }
     fn alloc_area(&mut self)->Result<BuddyItem,isize>{
         if self.free_cnt == 0 {
@@ -215,7 +196,7 @@ impl FreeArea {
         } else {
             self.free_cnt -= 1;
             let ret = self.list.pop_back().unwrap();
-            match  self._get_bitmap_index(ret.first_page) {
+            match  self._get_bitmap_index(ret.vaddr) {
                 Ok(index) => {
                     self.bitmap.turn_over(index);
                 }
@@ -230,18 +211,18 @@ impl FreeArea {
     // so check args before invoke this func.
     fn insert_area(&mut self,item:BuddyItem)->Option<BuddyItem>{
         self.free_cnt += 1;
-        match self._get_bitmap_index(item.first_page) {
+        match self._get_bitmap_index(item.vaddr) {
             Ok(index) => {
                 // check bitmap
                 let is_set = self.bitmap.get(index);
                 let is_max = (self.order == (MAX_ORDER-1));
                 if is_set && (!is_max){
                     // combime..
-                    let target_pfn = self._get_buddy_PFN(item.first_page);
+                    let buddy_vaddr = self._get_buddy_vaddr(item.vaddr);
                     let mut removed_index = self.list.len();
                     let mut removed_acc:usize = 0;
                     for area in self.list.iter() {
-                        if target_pfn == area.first_page {
+                        if buddy_vaddr == area.vaddr {
                             removed_index = removed_acc;
                             break;
                         }
@@ -254,14 +235,12 @@ impl FreeArea {
                     self.bitmap.clear(index);
                     // self.bitmap.turn_over(index);
                     let new_item = BuddyItem {
-                        first_page:
-                            if removed_item.first_page < item.first_page {
-                                removed_item.first_page
+                        vaddr:
+                            if removed_item.vaddr < item.vaddr {
+                                removed_item.vaddr
                             } else {
-                                item.first_page
+                                item.vaddr
                             }
-                        ,
-                        pg_cnt: item.pg_cnt*2
                     };
                     return Some(new_item);
                 } else {
@@ -278,12 +257,12 @@ impl FreeArea {
     fn is_empty(&self)->bool{
         self.free_cnt == 0
     }
-    fn _get_bitmap_index(&self,pfn:PFN)->Result<usize,isize>{
-        let pgs = order2pages(self.order);
-        if pfn< self.first_pfn {
+    fn _get_bitmap_index(&self, vaddr:Vaddr) ->Result<usize,isize>{
+        let pgs = utils::order2pages(self.order);
+        if vaddr < self.start_vaddr {
             return Err(-1);
         }
-        let pg = (pfn - self.first_pfn).0;
+        let pg = (vaddr - self.start_vaddr.0).0/PAGE_SIZE;
         let mut index = pg/pgs;
         if pg%pgs!=0{
             Err(-1)
@@ -292,24 +271,18 @@ impl FreeArea {
             Ok(index)
         }
     }
-    fn _get_buddy_PFN(&self,pfn :PFN)->PFN{
-        let pgs= order2pages(self.order);
-        let index = (pfn - self.first_pfn).0 / pgs;
-        let interval = PFN(pgs);
+    fn _get_buddy_vaddr(&self, vaddr:Vaddr) ->Vaddr{
+        let pgs= utils::order2pages(self.order);
+        let addr_interval = pgs*PAGE_SIZE;
+        let index = (vaddr - self.start_vaddr.0).0 / (pgs*PAGE_SIZE);
         if index%2 == 0 {
-            pfn + interval
+            vaddr + addr_interval
         } else {
-            pfn - interval
+            vaddr - addr_interval
         }
     }
 }
 
 pub fn buddy_test(){
-    bitmap_test();
-    let mut b = BuddyAllocator::new(Addr(0x0),Addr(0x1000000));
-    let m = b.alloc_area(0);
-    b.free_area(m.unwrap(), 0);
-    info_sync!("\n{:?}",b);
-    // page_test();
-    shutdown();
+
 }

@@ -2,6 +2,7 @@ use alloc::sync::Arc;
 use crate::consts::{KERNEL_STACK_SIZE_ORDER, PAGE_SIZE, STACK_MAGIC};
 use crate::mm::alloc_pages;
 use crate::mm::page::Page;
+use crate::pre::{InnerAccess, ReadWriteSingleOff};
 
 pub struct Stack{
     start:usize,
@@ -18,7 +19,7 @@ impl Stack {
                 None
             } else {
                 let mut p = Some(alloc_pages(KERNEL_STACK_SIZE_ORDER).unwrap());
-                p.as_ref().unwrap().front().get_page_writer().write_volatile(0,STACK_MAGIC  as u64);
+                unsafe { p.as_mut().unwrap().front().write_single_off(STACK_MAGIC as u64, 0); }
                 p
             }
         };
@@ -31,7 +32,7 @@ impl Stack {
                 magic = (self.start as *const u64).read_volatile();
             }
             Some(p) => {
-                magic = p.front().get_page_reader().read_volatile(0);
+                magic = p.front().read_single_off(0).unwrap();
             }
         }
         magic == STACK_MAGIC
@@ -42,7 +43,7 @@ impl Stack {
                 self.start
             }
             Some(p) => {
-                p.front().get_pfn().get_addr_usize()
+                p.front().get_vaddr().get_inner()
             }
         }
     }
@@ -52,7 +53,7 @@ impl Stack {
                 self.end
             }
             Some(p) => {
-                p.back().get_pfn().get_addr_usize()+PAGE_SIZE
+                p.back().get_vaddr().get_inner()+PAGE_SIZE
             }
         }
     }

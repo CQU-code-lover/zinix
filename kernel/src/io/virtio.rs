@@ -1,14 +1,16 @@
+use alloc::collections::LinkedList;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use fatfs::info;
+use fatfs::{info, trace};
 use virtio_drivers::{VirtIOBlk, VirtIOHeader};
 use crate::consts::PHY_MEM_OFFSET;
 use crate::io::{BlockRead, BlockReadWrite, BlockWrite};
-use crate::mm::addr::{Addr, PFN};
+use crate::mm::addr::{OldAddr, Paddr, PFN, Vaddr};
 use crate::mm::alloc_pages;
-use crate::mm::buddy::{order2pages, pages2order};
 use crate::mm::page::Page;
-use crate::{info_sync, println, SpinLock};
+use crate::{info_sync, println, SpinLock, trace_sync};
+use crate::pre::InnerAccess;
+use crate::utils::{order2pages, pages2order};
 
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
@@ -47,24 +49,22 @@ type PhysAddr = usize;
 type VirtAddr = usize;
 
 lazy_static!{
-    static ref DMA_FMS:SpinLock<Vec<Arc<Page>>> = SpinLock::new(Vec::new());
+    static ref DMA_FMS:SpinLock<LinkedList<Arc<Page>>> = SpinLock::new(LinkedList::new());
 }
 
 fn dma_fms_insert(pg:Arc<Page>){
-    DMA_FMS.lock().unwrap().push(pg);
+    DMA_FMS.lock().unwrap().push_back(pg);
 }
 
-fn dma_fms_remove(pfn:PFN)->Arc<Page>{
+fn dma_fms_remove(vaddr:Vaddr)->Arc<Page>{
     let mut fms = DMA_FMS.lock().unwrap();
     let mut index: usize = 0;
-    for i in fms.iter(){
-        if i.get_pfn() == pfn{
-            break;
+    let mut cursor = fms.cursor_front_mut();
+    while cursor.current().is_some() {
+        if cursor.current().unwrap().get_vaddr() == vaddr {
+            return cursor.remove_current().unwrap();
         }
-        index += 1;
-    }
-    if index<fms.len(){
-        return fms.remove(index);
+        cursor.move_next();
     }
     panic!("remove dma fail");
 }
@@ -72,30 +72,32 @@ fn dma_fms_remove(pfn:PFN)->Arc<Page>{
 #[no_mangle]
 pub extern "C" fn virtio_dma_alloc(pages: usize) -> PhysAddr{
     let pg = alloc_pages(pages2order(pages)).unwrap();
-    println!("{}",pages);
     dma_fms_insert(pg.clone());
-    let addr:Addr = pg.get_pfn().into();
-    let ret = addr.get_paddr();
-    info_sync!("{}\n",ret);
+    let paddr: Paddr = pg.get_vaddr().into();
+    let ret = paddr.get_inner();
+    trace_sync!("virtio dma alloc paddr {:#X}, pages {:#X}\n",ret,pages);
     return ret;
 }
 
 #[no_mangle]
 pub extern "C" fn virtio_dma_dealloc(paddr: PhysAddr, pages: usize) -> i32{
-    let pg = dma_fms_remove(Addr(Addr(paddr).get_vaddr()).into());
-    let len = pg.get_inner_guard().get_friend().len() + 1;
+    let pg = dma_fms_remove(Paddr(paddr).into());
+    trace_sync!("virtio dma dealloc paddr:{:#X} ,pgs:{:#X}",paddr,pages);
     // safe checker
-    info_sync!("dma drop pgs");
-    assert_eq!(len,pages);
+    assert_eq!(pg.get_block_page_cnt(),pages);
     0
 }
 
 #[no_mangle]
 pub extern "C" fn virtio_phys_to_virt(paddr: PhysAddr) -> VirtAddr {
-    paddr+ PHY_MEM_OFFSET
+    let p:Vaddr = Paddr(paddr).into();
+    // trace_sync!("virtio phy=>virt: {:#X}=>{:#X}",paddr,p.get_inner());
+    p.get_inner()
 }
 
 #[no_mangle]
 pub extern "C" fn virtio_virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
-    vaddr- PHY_MEM_OFFSET
+    let v:Paddr = Vaddr(vaddr).into();
+    // trace_sync!("virtio virt=>phy: {:#X}=>{:#X}",vaddr,v.get_inner());
+    v.get_inner()
 }

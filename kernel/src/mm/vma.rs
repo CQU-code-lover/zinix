@@ -1,11 +1,13 @@
+use alloc::collections::LinkedList;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::default::Default;
 use crate::consts::PAGE_SIZE;
 
-use crate::mm::addr::Addr;
-use crate::mm::buddy::order2pages;
+use crate::mm::addr::{OldAddr, Paddr, PageAlign, Vaddr};
+use crate::utils::order2pages;
 use crate::mm::mm::MmStruct;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{PageTable, PTEFlags};
@@ -22,14 +24,15 @@ bitflags! {
 }
 
 pub struct VMA{
-    start_addr:Addr,
-    end_addr:Addr,
+    start_vaddr: Vaddr,
+    end_vaddr: Vaddr,
     vm_flags:u8,
     inner:SpinLock<VMAMutInner>
 }
 
 struct VMAMutInner{
-    pages:Vec<Arc<Page>>,
+    // 使用link list有更好的增删性能
+    pages:LinkedList<Arc<Page>>,
     phy_pgs_cnt:usize,
     pagetable:Option<Arc<PageTable>>
 }
@@ -37,7 +40,7 @@ struct VMAMutInner{
 impl Default for VMAMutInner {
     fn default() -> Self {
         Self{
-            pages: vec![],
+            pages: Default::default(),
             phy_pgs_cnt: 0,
             pagetable:None
         }
@@ -47,8 +50,8 @@ impl Default for VMAMutInner {
 impl Default for VMA {
     fn default() -> Self {
         VMA{
-            start_addr:Default::default(),
-            end_addr:Default::default(),
+            start_vaddr:Default::default(),
+            end_vaddr:Default::default(),
             vm_flags:0,
             inner :SpinLock::new(VMAMutInner::default())
         }
@@ -60,47 +63,66 @@ fn _vma_flags_2_pte_flags(f:u8)->u8{
 }
 
 impl VMA {
-    pub fn new(start_addr:Addr,end_addr:Addr,pagetable:Arc<PageTable>,flags:u8)->Arc<Self>{
+    pub fn new(start_addr: Vaddr, end_addr: Vaddr, pagetable:Arc<PageTable>, flags:u8) ->Arc<Self>{
         Arc::new(VMA{
-            start_addr,
-            end_addr,
+            start_vaddr: start_addr,
+            end_vaddr: end_addr,
             vm_flags: flags,
             inner :SpinLock::new(VMAMutInner{
-                pages: vec![],
+                pages: Default::default(),
                 phy_pgs_cnt: 0,
                 pagetable: Some(pagetable)
             })
         })
     }
-    pub fn get_start_addr(&self)->Addr{
-        self.start_addr
+    pub fn get_start_vaddr(&self) -> Vaddr {
+        self.start_vaddr
     }
-    pub fn get_end_addr(&self)->Addr{
-        self.end_addr
+    pub fn get_end_vaddr(&self) -> Vaddr {
+        self.end_vaddr
     }
-    pub fn in_vma(&self, vaddr: Addr) ->bool{
-        vaddr >=self.start_addr&& vaddr <self.end_addr
+    pub fn in_vma(&self, vaddr: Vaddr) ->bool{
+        vaddr >=self.start_vaddr && vaddr <self.end_vaddr
     }
-    pub fn map_pages(&self,pages:Arc<Page>,vaddr: Addr)->Result<(),isize>{
-        // check arg
-        if !vaddr.is_align() {
-            return Err(-1);
-        }
-        if !self.in_vma(vaddr) {
-            return Err(-1);
-        }
+
+    // 为什么要返回错误值？ 可能出现映射区域超出vma范围情况
+    // 输入参数要求，vaddr align && vaddr in vma
+    // 可能的错误： -1 映射物理页超出vma范围
+    pub fn map_pages(&self, pages:Arc<Page>, vaddr: Vaddr)->Result<(),isize>{
+        debug_assert!(vaddr.is_align());
+        debug_assert!(self.in_vma(vaddr));
         let mut inner = self.inner.lock_irq().unwrap();
         let pgs_cnt = order2pages(pages.get_order());
-        if (self.get_end_addr()-vaddr).0 < pgs_cnt*PAGE_SIZE {
+        if (self.get_end_vaddr()-vaddr.0).0 < pgs_cnt*PAGE_SIZE {
             return Err(-1);
         }
         // do map in pagetable
         // vma flags to pte flags
         let pte_flags = _vma_flags_2_pte_flags(self.get_flags());
-        inner.pagetable.as_ref().unwrap().map_pages(vaddr,pages.clone(),pte_flags);
+        inner.pagetable.as_ref().unwrap().map_pages(vaddr,pages.get_vaddr().into(),pages.get_order(),pte_flags);
         inner.phy_pgs_cnt += pgs_cnt;
-        inner.pages.push(pages);
+        inner.pages.push_back(pages);
         Ok(())
+    }
+    // 只能按照page block的方式unmap
+    pub fn unmap_pages(&self, vaddr:Vaddr)->Option<Arc<Page>>{
+        let mut inner = self.inner.lock_irq().unwrap();
+        // find pgs from link list
+        let mut cursor = inner.pages.cursor_front_mut();
+        let mut removed:Option<Arc<Page>> = None;
+        while cursor.current().is_some() {
+            if cursor.current().unwrap().get_vaddr() == vaddr {
+                removed = cursor.remove_current();
+            }
+            cursor.move_next();
+        }
+        // unmap pagetable
+        if removed.is_some() {
+            let order = removed.as_ref().unwrap().get_order();
+            // bug if unmap pagetable fail
+            assert!(self.get_pagetable().unmap_pages(vaddr,order).is_ok());
+        }
+        removed
     }
     pub fn get_pagetable(&self)->Arc<PageTable>{
         self.inner.lock_irq().unwrap().pagetable.as_ref().unwrap().clone()

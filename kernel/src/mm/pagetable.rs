@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::arch::riscv64::sfence_vma_vaddr;
 use core::borrow::Borrow;
 use core::cmp::Ordering;
 use fatfs::debug;
@@ -13,9 +14,10 @@ use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET};
 use crate::{debug_sync, error_sync, println, SpinLock, trace_sync};
 use crate::asm::w_satp;
 use crate::mm::{alloc_one_page, alloc_pages, KERNEL_PAGETABLE, skernel};
-use crate::mm::addr::{Addr, PFN};
-use crate::mm::buddy::order2pages;
+use crate::mm::addr::{OldAddr, Paddr, PFN, Vaddr};
+use crate::utils::order2pages;
 use crate::mm::page::Page;
+use crate::pre::InnerAccess;
 use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
 
 extern "C" {
@@ -53,10 +55,10 @@ impl WalkRet {
 impl PageTable {
     pub fn new_user()->Self{
         let mut p = PageTable::default();
-        let root_addr = KERNEL_PAGETABLE.lock().unwrap()._get_root_page_addr();
+        let root_addr = KERNEL_PAGETABLE.lock().unwrap()._get_root_page_vaddr().get_inner();
         for i in (0..PAGE_SIZE).filter(|x|{x%8==0}) {
             unsafe {
-                ((p._get_root_page_addr() + i) as *mut u64).write_volatile(
+                ((p._get_root_page_vaddr() + i).0 as *mut u64).write_volatile(
                     ((root_addr + i) as *const u64).read_volatile()
                 );
             }
@@ -64,7 +66,8 @@ impl PageTable {
         p
     }
     pub unsafe fn install(&self){
-        let paddr = self._get_root_page_addr()-PHY_MEM_OFFSET;
+        let p:Paddr = self._get_root_page_vaddr().into();
+        let paddr = p.get_inner();
         let satp_val = ((8 as usize) <<60)|(paddr>>12);
         w_satp(satp_val);
     }
@@ -74,12 +77,12 @@ impl PageTable {
     // alloc时默认不使用大页
     fn _walk_common(&self, vaddr:usize, alloc:bool)->Option<WalkRet>{
         // walk will access pagetable,use lock..
-        let mut pg_addr = self._get_root_page_addr();
+        let mut pg_vaddr = self._get_root_page_vaddr().get_inner();
         let mut lock = self.private_pgs.lock_irq().unwrap();
         let ppn_arr = [addr_get_ppn2(vaddr),addr_get_ppn1(vaddr),addr_get_ppn0(vaddr)];
         for i in 0..3{
             let index = ppn_arr[i];
-            let entry_addr = pg_addr+index*8;
+            let entry_addr = pg_vaddr +index*8;
             let entry =unsafe {get_usize_by_addr(entry_addr)};
             let mut pte = PTE::from(entry);
             // 如果是leaf，不管pte是否valid都能返回
@@ -101,7 +104,8 @@ impl PageTable {
                 // pte.clear_flags(
                 //     PTEFlags::A.bits|
                 //     PTEFlags::D.bits);
-                pg_addr = Addr(pte.get_point_paddr()).get_vaddr();
+                let v:Vaddr = Paddr(pte.get_point_paddr()).into();
+                pg_vaddr = v.get_inner();
                 unsafe {
                     set_usize_by_addr(entry_addr,pte.into());
                 };
@@ -111,45 +115,44 @@ impl PageTable {
                 // invalid 的页表项，不是leaf
                 if alloc {
                     let pg_arc = alloc_pages(0).unwrap();
-                    let allocated_page_vaddr = pg_arc.get_pfn().get_addr_usize();
+                    let allocated_page_vaddr = pg_arc.get_vaddr().get_inner();
                     // 防止deadlock
                     // self._insert_new_pages(pg_arc);
                     lock.push(pg_arc);
                     pte.set_ppn_by_paddr(allocated_page_vaddr -PHY_MEM_OFFSET);
-                    let pp = pte.get_point_paddr();
                     //set RWX
                     //此时一定是非叶子页表
-                    pte.clear_flags(PTEFlags::R.bits|
-                        PTEFlags::W.bits|
-                        PTEFlags::X.bits|
-                        PTEFlags::U.bits|
-                        PTEFlags::A.bits|
-                        PTEFlags::D.bits);
+                    // pte.clear_flags(PTEFlags::R.bits|
+                    //     PTEFlags::W.bits|
+                    //     PTEFlags::X.bits|
+                    //     PTEFlags::U.bits|
+                    //     PTEFlags::A.bits|
+                    //     PTEFlags::D.bits);
+                    pte.clear_all_flags();
                     pte.set_flags(PTEFlags::V.bits);
                     let new_pte_val = pte.into();
                     // write back pte value
                     unsafe {
                         set_usize_by_addr(entry_addr,new_pte_val)
                     };
-                    pg_addr = allocated_page_vaddr;
+                    pg_vaddr = allocated_page_vaddr;
                 }
                 else {
                     return None;
                 }
             }
         }
-        // bug：三级页表项出现RWX全0情况
         error_sync!("Walk Fault!");
         return None;
     }
     //强制映射 可能会破坏大页
     pub fn _force_map_one(&self,vaddr:usize,paddr:usize,map_flag:u8){
-        let mut pg_addr = self._get_root_page_addr();
+        let mut pg_vaddr = self._get_root_page_vaddr().get_inner();
         let mut lock = self.private_pgs.lock_irq().unwrap();
         let ppn_arr = [addr_get_ppn2(vaddr),addr_get_ppn1(vaddr),addr_get_ppn0(vaddr)];
         for i in 0..3{
             let index = ppn_arr[i];
-            let entry_addr = pg_addr+index*8;
+            let entry_addr = pg_vaddr +index*8;
             let entry =unsafe {get_usize_by_addr(entry_addr)};
             let mut pte = PTE::from(entry);
             if i == 2 {
@@ -162,7 +165,7 @@ impl PageTable {
             }
             if pte.is_leaf()||(!pte.vaild()){
                 let pg_arc = alloc_pages(0).unwrap();
-                let allocated_page_vaddr = pg_arc.get_pfn().get_addr_usize();
+                let allocated_page_vaddr = pg_arc.get_vaddr().get_inner();
                 // 防止deadlock
                 // self._insert_new_pages(pg_arc);
                 lock.push(pg_arc);
@@ -177,11 +180,11 @@ impl PageTable {
                 unsafe {
                     set_usize_by_addr(entry_addr, new_pte_val)
                 };
-                pg_addr = allocated_page_vaddr;
+                pg_vaddr = allocated_page_vaddr;
                 continue;
             }
             if pte.vaild() {
-                pg_addr = Addr(pte.get_point_paddr()).get_vaddr();
+                pg_vaddr = OldAddr(pte.get_point_paddr()).get_vaddr();
                 continue;
             }
         }
@@ -230,11 +233,8 @@ impl PageTable {
             Some(ret)=> ret
         }
     }
-    pub fn map_one_page(&self, vaddr:Addr, page:Arc<Page>, flags:u8) {
-        trace_sync!("map one page vaddr={:#X}",vaddr.0);
-        if vaddr.0==0x3FFFFF1000{
-            println!("1");
-        }
+    pub fn map_one_page(&self, vaddr: Vaddr, paddr:Paddr, flags:u8) {
+        trace_sync!("map one page {:#X}=>{:#X}",vaddr.0,paddr.0);
         let r = self.walk_alloc(vaddr.0);
 
         let lock = self.private_pgs.lock_irq().unwrap();
@@ -242,7 +242,7 @@ impl PageTable {
             WalkRetLevelLeaf => {
                 let pte_val = unsafe { get_usize_by_addr(r.pte_addr) };
                 let mut pte = PTE::from(pte_val);
-                pte.set_ppn_by_paddr(page.get_pfn().get_addr_usize()-PHY_MEM_OFFSET);
+                pte.set_ppn_by_paddr(paddr.get_inner());
                 if pte.vaild() {
                     panic!("page vaddr={:#X} already have been mapped!, map to paddr :{:#X}",vaddr.0,pte.get_point_paddr());
                 }
@@ -254,22 +254,24 @@ impl PageTable {
                 panic!("big page exist in mapped space,map fail");
             }
         }
+        // clear tlb entry
+        unsafe { sfence_vma_vaddr(vaddr.get_inner()); }
     }
+
     // this func can`t check mapped virtual space exist other map.
     // must check by caller
-    pub fn map_pages(&self,vaddr:Addr, pages:Arc<Page>,flags:u8){
-        self.map_one_page(vaddr, pages.clone(), flags);
-        let mut vaddr_now = vaddr+Addr(PAGE_SIZE);
-        for pg in pages.get_inner_guard().get_friend().iter() {
-            self.map_one_page(vaddr_now, pg.clone(), flags);
-            vaddr_now = vaddr_now+Addr(PAGE_SIZE);
+    pub fn map_pages(&self, vaddr: Vaddr, paddr: Paddr, order:usize, flags:u8){
+        let pgs = order2pages(order);
+        for i in 0..pgs {
+            let append = i*PAGE_SIZE;
+            self.map_one_page(vaddr+append, paddr+append, flags);
         }
     }
     // return the unmap page`s paddr
     // this func is not pub, because unmap one map in
     // a pages block which len is not 1 is not allowed.
-    fn _unmap_one_page(&self ,vaddr:Addr)->Result<Addr,isize>{
-        let mut ret:Result<Addr,isize> = Err(-1);
+    fn _unmap_one_page(&self, vaddr: Vaddr) ->Result<Paddr,isize>{
+        let mut ret:Result<Paddr,isize> = Err(-1);
         let r = self.walk_alloc(vaddr.0);
 
         let lock = self.private_pgs.lock_irq().unwrap();
@@ -277,7 +279,7 @@ impl PageTable {
             WalkRetLevelLeaf => {
                 let pte_val = unsafe { get_usize_by_addr(r.pte_addr) };
                 let mut pte = PTE::from(pte_val);
-                ret = Ok(Addr(pte.get_point_paddr()));
+                ret = Ok(Paddr(pte.get_point_paddr()));
                 pte.set_ppn_by_paddr(0);
                 let now_flags = pte.flags;
                 let new_mask = !(PTEFlags::V.bits);
@@ -290,49 +292,41 @@ impl PageTable {
                 panic!("big page exist in mapped space,unmap fail");
             }
         }
+        unsafe { sfence_vma_vaddr(vaddr.get_inner()); }
         ret
     }
 
     // unmap pages.
     // Can only free all of a page block, not a portion of it.
     // otherwise a panic will be report.
-    pub fn unmap_pages(&self,vaddr:Addr,order:usize)->Addr{
+    // todo 检查unmap的paddr是否连续
+    pub fn unmap_pages(&self, vaddr: Vaddr, order:usize)->Result<Paddr,isize>{
         let pgs = order2pages(order);
-        let mut ret_option : Option<Addr> = None;
+        let mut ret_option : Option<Paddr> = None;
         let mut vaddr_probe = vaddr;
         for _ in 0..pgs{
             match self._unmap_one_page(vaddr_probe) {
                 Ok(v) => {
-                    match ret_option {
-                        None => {
-                            ret_option = Some(v);
-                        }
-                        Some(_) => {}
+                    if ret_option.is_none(){
+                        ret_option = Some(v);
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     // err
-                    panic!("pagetable unmap fail");
+                    return Err(e);
                 }
             }
-            vaddr_probe=vaddr_probe+Addr(PAGE_SIZE);
+            vaddr_probe += PAGE_SIZE;
         }
-        match ret_option {
-            None => {
-                panic!("pagetable unmap fail");
-            }
-            Some(v) => {
-                v
-            }
-        }
+        Ok(ret_option.unwrap())
     }
 
     // todo map的pages需要添加到mm空间的表中
     pub unsafe fn flush_self(&self){
         sfence_vma_all();
     }
-    fn _get_root_page_addr(& self) ->usize{
-        self.private_pgs.lock_irq().unwrap()[0].get_pfn().get_addr_usize()
+    fn _get_root_page_vaddr(& self) ->Vaddr{
+        self.private_pgs.lock_irq().unwrap()[0].get_vaddr()
     }
 }
 
@@ -409,6 +403,9 @@ impl PTE {
         let n_mask = flag_mask^0xFF;
         self.flags &=n_mask;
     }
+    fn clear_all_flags(&mut self){
+        self.flags = 0;
+    }
     fn _get_bits(&self, flag_mask:u8)->bool{
         return self.flags &flag_mask!=0;
     }
@@ -438,7 +435,7 @@ pub fn create_kernel_pagetable()->PageTable{
     let kernel_pagetable_root = boot_pagetable as usize;
     // this page is not in PAGE_MANAGER.
     let mut pg = Page::default();
-    pg.__set_pfn(PFN::from(kernel_pagetable_root));
+    pg.__set_vaddr(Vaddr(kernel_pagetable_root));
     let kp = PageTable{
         private_pgs: SpinLock::new(vec![Arc::new(pg)])
     };

@@ -9,6 +9,7 @@
 #![feature(linked_list_cursors)]
 #![feature(step_trait)]
 #![feature(mixed_integer_ops)]
+#![feature(stdsimd)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(unused)]
@@ -60,6 +61,7 @@ mod syscall;
 mod fs;
 mod test;
 mod io;
+mod pre;
 
 global_asm!(include_str!("entry.asm"));
 

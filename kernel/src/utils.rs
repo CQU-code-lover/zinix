@@ -1,5 +1,6 @@
 use core::ptr::{addr_of, addr_of_mut};
-use crate::consts::{DIRECT_MAP_START, PAGE_OFFSET, PAGE_SIZE};
+use log::error;
+use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
 
 pub fn addr_page_align_upper(addr:usize) ->usize{
     let mut ret = addr-(addr&PAGE_SIZE);
@@ -47,4 +48,22 @@ pub unsafe fn memcpy(dest:usize,src: usize,len:usize){
     for i in 0..len{
         *((dest+i) as *mut u8) = *((src+i) as *mut u8);
     }
+}
+
+pub fn order2pages(order:usize) ->usize{
+    return if order < MAX_ORDER {
+        1 << order
+    } else {
+        0
+    }
+}
+
+pub fn pages2order(pages:usize) ->usize{
+    for i in 0..MAX_ORDER{
+        if order2pages(i)>=pages{
+            return i;
+        }
+    }
+    error!("pg2order fail");
+    return MAX_ORDER;
 }

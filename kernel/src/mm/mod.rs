@@ -16,7 +16,8 @@ use pagetable::PageTable;
 
 use crate::{consts, info_sync, println, SpinLock, trace_sync};
 use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, PHY_MEM_START};
-use crate::mm::addr::{Addr, PFN};
+use crate::mm::addr::{addr_test, OldAddr, PageAlign, PFN, Vaddr};
+use crate::mm::bitmap::bitmap_test;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{PTE, PTEFlags};
 use crate::sbi::shutdown;
@@ -72,15 +73,13 @@ pub fn get_kernel_pagetable()->Arc<SpinLock<PageTable>>{
     KERNEL_PAGETABLE.clone()
 }
 
-fn page_init(start_addr:Addr, end_addr:Addr){
+fn page_init(start_addr: Vaddr, end_addr: Vaddr){
     PAGES_MANAGER.lock().unwrap().init(start_addr,end_addr);
 }
 
-fn buddy_init(start_addr:Addr,end_addr:Addr){
+fn buddy_init(start_addr: Vaddr, end_addr: Vaddr){
     BUDDY_ALLOCATOR.lock().unwrap().init(start_addr,end_addr);
 }
-
-const VIRT_ADDR:usize = 0x10001000;
 
 fn hardware_address_map_init(){
     let lock = KERNEL_PAGETABLE.lock().unwrap();
@@ -94,8 +93,8 @@ fn hardware_address_map_init(){
     trace_sync!("map virt ok");
 }
 
-pub fn _insert_area_for_page_drop(pfn:PFN,order:usize)->Result<(),isize>{
-    BUDDY_ALLOCATOR.lock().unwrap().free_area(pfn,order)
+pub fn _insert_area_for_page_drop(vaddr:Vaddr, order:usize) ->Result<(),isize>{
+    BUDDY_ALLOCATOR.lock().unwrap().free_area(vaddr, order)
 }
 
 pub fn mm_init(){
@@ -108,8 +107,8 @@ pub fn mm_init(){
     info_sync!("Heap Allocator Init OK!");
     // init PAGE FRAME ALLOCATOR
     let emem = (qemu_mem_mb as usize)*1024*1024+PHY_MEM_START;
-    let mut s_addr = Addr(new_ek);
-    let mut e_addr = Addr(emem);
+    let mut s_addr = Vaddr(new_ek);
+    let mut e_addr = Vaddr(emem);
     s_addr = s_addr.ceil();
     e_addr = e_addr.floor();
     buddy_init(s_addr,e_addr);
@@ -123,8 +122,8 @@ pub fn alloc_pages(order:usize)->Option<Arc<Page>>{
     }
     let area = BUDDY_ALLOCATOR.lock().unwrap().alloc_area(order);
     return match area {
-        Ok(pfn) => {
-            let pgs = PAGES_MANAGER.lock().unwrap().new_pages_block_in_memory(pfn, order);
+        Ok(vaddr) => {
+            let pgs = PAGES_MANAGER.lock().unwrap().new_pages_block_in_memory(vaddr, order);
             pgs.clear_pages_block();
             Some(pgs)
         }
@@ -143,4 +142,10 @@ pub fn alloc_one_page()->Option<Arc<Page>>{
 // do same things with 'Drop(page)'
 pub fn free_pages(page:Arc<Page>){
     return;
+}
+
+pub fn mm_test(){
+    bitmap_test();
+    addr_test();
+    shutdown();
 }

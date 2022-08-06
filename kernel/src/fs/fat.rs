@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use core::cell::RefCell;
 use core::cmp::{max, min};
 use fatfs::{DefaultTimeProvider, FileSystem, FsOptions, IntoStorage, IoBase, LossyOemCpConverter, SeekFrom};
-use crate::{debug_sync, SpinLock};
+use crate::{debug_sync, SpinLock, trace_sync};
 use crate::debug;
 use crate::io::{ BlockReadWrite};
 use crate::io::sdcard::SDCardDev;
@@ -140,7 +140,7 @@ impl<T:BlockReadWrite> fatfs::Seek for BlkStorage<T> {
                 panic!("BlkStorage can`t get end");
             }
             SeekFrom::Current(off) => {
-                debug_sync!("seek cur {}",off);
+                trace_sync!("seek cur {}",off);
                 self.pos = self.pos.wrapping_add_signed(off);
             }
         }
