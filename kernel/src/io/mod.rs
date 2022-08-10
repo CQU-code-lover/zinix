@@ -8,6 +8,7 @@ use core::any::Any;
 use fatfs::IntoStorage;
 use virtio::VirtioDev;
 use crate::fs::fat::BlkStorage;
+use crate::io::virtio::virtio_test;
 
 pub struct IOBytes<T>{
     inner:T
@@ -130,4 +131,8 @@ pub trait BlockReadBuf:BlockRead{
 
 pub trait BlockWriteBuf:BlockWrite{
 
+}
+
+pub fn io_test(){
+    virtio_test();
 }

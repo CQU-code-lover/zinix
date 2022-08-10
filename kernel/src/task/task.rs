@@ -7,11 +7,12 @@ use core::default::default;
 use core::hash::Hash;
 use core::mem;
 use core::mem::size_of;
-use core::ops::Add;
+use core::ops::{Add, Index};
+use core::ptr::slice_from_raw_parts_mut;
 use fatfs::Read;
 use log::error;
 use crate::asm::{disable_irq, enable_irq, r_sp, r_sstatus, r_tp, SSTATUS_SIE, SSTATUS_SPIE, SSTATUS_SPP};
-use crate::consts::{BOOT_STACK_NR_PAGES, PAGE_SIZE, STACK_MAGIC, USER_STACK_MAX_ADDR};
+use crate::consts::{BOOT_STACK_NR_PAGES, MAX_ORDER, PAGE_SIZE, STACK_MAGIC, USER_STACK_MAX_ADDR};
 use crate::mm::mm::MmStruct;
 use crate::mm::pagetable::PageTable;
 use crate::{error_sync, println, SpinLock, trace_sync};
@@ -20,11 +21,13 @@ use crate::task::stack::Stack;
 use riscv::register::*;
 use crate::mm::aux::*;
 use xmas_elf::symbol_table::Visibility::Default;
-use crate::fs::dfile::{DFile, get_stdin, get_stdout};
+use crate::fs::dfile::{DFile, get_stderr, get_stdin, get_stdout};
 use crate::fs::dfile::DFILE_TYPE::DFTYPE_STDIN;
 use crate::fs::fat::get_fatfs;
 use crate::fs::get_dentry_from_dir;
 use crate::mm::{alloc_pages, get_kernel_pagetable};
+use crate::mm::addr::{Addr, Vaddr};
+use crate::mm::page::Page;
 use crate::pre::InnerAccess;
 use crate::utils::{order2pages, pages2order};
 use crate::sbi::shutdown;
@@ -138,7 +141,8 @@ pub struct Task {
     parent: Option<Weak<SpinLock<Task>>>,
     status: TaskStatus,
     pub mm: Option<MmStruct>,
-    opened: Vec<Option<Arc<DFile>>>
+    opened: Vec<Option<Arc<DFile>>>,
+    pwd:String
 }
 
 // impl Add<usize> for Addr {
@@ -148,6 +152,10 @@ pub struct Task {
 //         rhs
 //     }
 // }
+
+fn get_init_pwd()->String {
+    String::from("/")
+}
 
 impl Task {
     pub fn __core_init(){
@@ -173,7 +181,8 @@ impl Task {
             parent: None,
             status: TaskStatus::TaskRunning,
             mm: None,
-            opened: vec![None;MAX_OPENED]
+            opened: vec![None;MAX_OPENED],
+            pwd:get_init_pwd()
         };
         sscratch::write(0);
         unsafe {
@@ -190,8 +199,38 @@ impl Task {
     pub fn set_status(&mut self,status :TaskStatus) {
         self.status = status;
     }
-    pub fn get_opened(&self,index:usize)->Arc<DFile>{
-        self.opened[index].as_ref().unwrap().clone()
+    pub fn get_opened(&self, fd:usize) ->Option<Arc<DFile>>{
+        if fd < self.opened.len() {
+            self.opened[fd].as_ref().map(|x|{
+                x.clone()
+            })
+        } else {
+            None
+        }
+    }
+    pub fn set_opend(&mut self,fd:usize,file:Option<Arc<DFile>>)->Result<Option<Arc<DFile>>,isize>{
+        if fd < self.opened.len() {
+            let ret = self.opened[fd].as_ref().map(|x|{
+                x.clone()
+            });
+            self.opened[fd] = file;
+            Ok(ret)
+        } else {
+            Err(-1)
+        }
+    }
+    pub fn alloc_opend(&mut self,file:Arc<DFile>)->Option<usize>{
+        for i in 0..self.opened.len(){
+            match self.opened[i].as_ref(){
+                None => {
+                    // find empty
+                    self.opened[i] = Some(file);
+                    return Some(i);
+                }
+                Some(_) => {}
+            }
+        }
+        None
     }
     pub fn is_kern(&self)->bool {
         match self.mm {
@@ -212,10 +251,12 @@ impl Task {
             parent: None,
             status: TaskStatus::TaskRunning,
             mm: None,
-            opened:vec![None;MAX_OPENED]
+            opened:vec![None;MAX_OPENED],
+            pwd:get_init_pwd()
         };
         tsk.opened[0] = Some(get_stdin());
         tsk.opened[1] = Some(get_stdout());
+        tsk.opened[2] = Some(get_stderr());
         tsk.context.ra = kern_trap_ret as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
         tsk.context.sstatus = r_sstatus()|SSTATUS_SPP|SSTATUS_SPIE|SSTATUS_SIE;
@@ -229,28 +270,48 @@ impl Task {
     pub fn create_kern_task_and_run(func:fn()){
         add_task(Arc::new(SpinLock::new(Self::create_kern_task(func))))
     }
-    pub unsafe fn create_user_task_and_run(path:&str,args:Vec<String>){
-        let level = disable_irq();
+    pub unsafe fn create_user_task(path:&str,args:Vec<String>)->Arc<SpinLock<Task>>{
         let fs_g = get_fatfs();
-        let fs= fs_g.lock().unwrap();
+        let fs= fs_g.lock_irq().unwrap();
         let wrapper = get_dentry_from_dir(fs.root_dir(), path).unwrap();
         let file_len = wrapper.len;
-        assert!(file_len<0x400000);
         let mut f = wrapper.to_file();
-        let pages = alloc_pages(pages2order((file_len/PAGE_SIZE)+1)).unwrap();
-        println!("order:{},len: {},vaddr: {:#X}=>{:#X}",pages.get_order(),file_len,pages.get_vaddr().0,(pages.get_vaddr()+order2pages(pages.get_order())*PAGE_SIZE).0);
-        let ptr = pages.get_vaddr().get_inner() as *mut [u8;0x400000];
-        let read_buf = &mut *ptr;
+        let mut pages_tracer:Vec<Arc<Page>> = Vec::new();
+        let max_order_size = PAGE_SIZE*order2pages(MAX_ORDER-1);
+        let read_buf = if file_len>max_order_size {
+            let mut block_cnt  = file_len/max_order_size;
+            if file_len%max_order_size!=0{
+                block_cnt+=1;
+            }
+            for _ in 0..block_cnt {
+                pages_tracer.push(alloc_pages(MAX_ORDER-1).unwrap());
+            }
+            let mut pre:Option<Arc<Page>> = None;
+            for i in pages_tracer.iter().rev(){
+                if pre.is_some() {
+                    assert_eq!(pre.as_ref().unwrap().get_vaddr() + max_order_size, i.get_vaddr());
+                }
+                pre = Some(i.clone());
+            }
+            let ptr = pages_tracer[pages_tracer.len()-1].get_vaddr().get_inner() as * mut u8;
+            slice_from_raw_parts_mut(ptr,order2pages(MAX_ORDER-1)*PAGE_SIZE*pages_tracer.len())
+        } else {
+            let order = (file_len/PAGE_SIZE)+1;
+            pages_tracer.push(alloc_pages(order).unwrap());
+            let ptr = pages_tracer[0].get_vaddr().get_inner() as *mut u8;
+            slice_from_raw_parts_mut(ptr,order2pages(order)*PAGE_SIZE)
+        };
+
         let mut cnt: usize = 0;
         loop {
-            let read = f.read(&mut read_buf[cnt..]).unwrap();
+            let read = f.read(&mut (*read_buf)[cnt..]).unwrap();
             cnt += read;
             if read == 0 {
                 break;
             }
         }
         println!("{}",cnt);
-        let (mm_struct, mut auxv, entry_point) = MmStruct::new_from_elf(&read_buf[..cnt]);
+        let (mm_struct, mut auxv, entry_point) = MmStruct::new_from_elf(&(*read_buf)[..cnt]);
 
         trace_sync!("New User Task: entry point={:#X}",entry_point);
         let mut tsk = Task {
@@ -261,10 +322,12 @@ impl Task {
             parent: None,
             status: TaskStatus::TaskRunning,
             mm: Some(mm_struct),
-            opened:vec![None;MAX_OPENED]
+            opened:vec![None;MAX_OPENED],
+            pwd:get_init_pwd()
         };
         tsk.opened[0] = Some(get_stdin());
         tsk.opened[1] = Some(get_stdout());
+        tsk.opened[2] = Some(get_stderr());
         tsk.context.ra = user_trap_ret as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
         tsk.context.sstatus = r_sstatus()|SSTATUS_SPIE|SSTATUS_SIE&(!SSTATUS_SPP);
@@ -398,13 +461,25 @@ impl Task {
 
         unsafe { tf.write_to(tsk.context.sp); }
 
-        let kkk = *(0x16ff0 as *const usize);
 
-        enable_irq(level);
-        get_kernel_pagetable().lock_irq().unwrap().install();
-        add_task(Arc::new(SpinLock::new(tsk)));
-        trace_sync!("add user task OK");
+        // get_kernel_pagetable().lock_irq().unwrap().install();
+        // let v:u32 =
+        //     unsafe {
+        //         tsk.mm.as_ref().unwrap()._read_single_by_vaddr(Vaddr(0x11980))
+        //     };
+        // println!("{:#X}",v);
         // shutdown();
+        trace_sync!("add user task OK");
+        Arc::new(SpinLock::new(tsk))
+    }
+    pub unsafe fn create_user_task_and_run(path:&str,args:Vec<String>){
+        add_task(Self::create_user_task(path,args));
+    }
+    pub fn pwd_mut_ref(&mut self)->&mut String{
+        &mut self.pwd
+    }
+    pub fn pwd_ref(& self)->&String{
+        &self.pwd
     }
     pub fn get_ctx_mut_ref(&mut self)->&mut TaskContext{
         &mut self.context

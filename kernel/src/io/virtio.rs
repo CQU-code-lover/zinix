@@ -1,9 +1,10 @@
 use alloc::collections::LinkedList;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use fatfs::{info, trace};
+use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
+use crate::{info, trace};
 use virtio_drivers::{VirtIOBlk, VirtIOHeader};
-use crate::consts::PHY_MEM_OFFSET;
+use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET};
 use crate::io::{BlockRead, BlockReadWrite, BlockWrite};
 use crate::mm::addr::{OldAddr, Paddr, PFN, Vaddr};
 use crate::mm::alloc_pages;
@@ -100,4 +101,20 @@ pub extern "C" fn virtio_virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
     let v:Paddr = Vaddr(vaddr).into();
     // trace_sync!("virtio virt=>phy: {:#X}=>{:#X}",vaddr,v.get_inner());
     v.get_inner()
+}
+
+pub fn virtio_test(){
+    info_sync!("read start");
+    let v = VirtioDev::new();
+    let pages = alloc_pages(pages2order(5)).unwrap();
+    // println!("order:{},len: {},vaddr: {:#X}=>{:#X}",pages.get_order(),file_len,pages.get_vaddr().0,(pages.get_vaddr()+order2pages(pages.get_order())*PAGE_SIZE).0);
+    let ptr = pages.get_vaddr().get_inner() as *mut u8;
+    let pgs = order2pages(5);
+    let read_buf = slice_from_raw_parts_mut(ptr,0x400000);
+    // let read_buf = &mut unsafe { *ptr };
+    // let mut buf = [0u8;512];
+    for i in 0..(pgs*PAGE_SIZE)/512{
+        unsafe { v.read_block(i, &mut (*read_buf)[i * 512..(i + 1) * 512]); }
+    }
+    println!("read ok");
 }

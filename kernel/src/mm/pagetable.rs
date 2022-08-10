@@ -13,8 +13,9 @@ use riscv::register::satp::Satp;
 use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET};
 use crate::{debug_sync, error_sync, println, SpinLock, trace_sync};
 use crate::asm::w_satp;
-use crate::mm::{alloc_one_page, alloc_pages, KERNEL_PAGETABLE, skernel};
-use crate::mm::addr::{OldAddr, Paddr, PFN, Vaddr};
+use crate::mm::{alloc_one_page, alloc_pages, get_kernel_pagetable, skernel};
+use crate::mm::addr::{OldAddr, Paddr, PageAlign, PFN, Vaddr};
+use crate::mm::mm::{MmStruct, VmaCache};
 use crate::utils::order2pages;
 use crate::mm::page::Page;
 use crate::pre::InnerAccess;
@@ -55,7 +56,7 @@ impl WalkRet {
 impl PageTable {
     pub fn new_user()->Self{
         let mut p = PageTable::default();
-        let root_addr = KERNEL_PAGETABLE.lock().unwrap()._get_root_page_vaddr().get_inner();
+        let root_addr = get_kernel_pagetable()._get_root_page_vaddr().get_inner();
         for i in (0..PAGE_SIZE).filter(|x|{x%8==0}) {
             unsafe {
                 ((p._get_root_page_vaddr() + i).0 as *mut u64).write_volatile(
@@ -145,6 +146,20 @@ impl PageTable {
         error_sync!("Walk Fault!");
         return None;
     }
+    pub fn get_kvaddr_by_uvaddr(&self,vaddr:Vaddr)->Option<Vaddr> {
+        let off = vaddr.0 % PAGE_SIZE;
+        let mut vaddr_ = vaddr.clone();
+        vaddr_.align();
+        let r = self.walk(vaddr_.get_inner());
+
+        r.map(|x|{
+            if x.level == WalkRetLevelLeaf {
+                Paddr(x.get_pte().get_point_paddr()+off).into()
+            } else {
+                todo!()
+            }
+        })
+    }
     //强制映射 可能会破坏大页
     pub fn _force_map_one(&self,vaddr:usize,paddr:usize,map_flag:u8){
         let mut pg_vaddr = self._get_root_page_vaddr().get_inner();
@@ -233,8 +248,9 @@ impl PageTable {
             Some(ret)=> ret
         }
     }
-    pub fn map_one_page(&self, vaddr: Vaddr, paddr:Paddr, flags:u8) {
-        trace_sync!("map one page {:#X}=>{:#X}",vaddr.0,paddr.0);
+
+    //检查是否未映射最小页面
+    pub fn is_not_mapped(&self, vaddr: Vaddr)->bool{
         let r = self.walk_alloc(vaddr.0);
 
         let lock = self.private_pgs.lock_irq().unwrap();
@@ -242,12 +258,44 @@ impl PageTable {
             WalkRetLevelLeaf => {
                 let pte_val = unsafe { get_usize_by_addr(r.pte_addr) };
                 let mut pte = PTE::from(pte_val);
-                pte.set_ppn_by_paddr(paddr.get_inner());
                 if pte.vaild() {
-                    panic!("page vaddr={:#X} already have been mapped!, map to paddr :{:#X}",vaddr.0,pte.get_point_paddr());
+                    false
+                } else {
+                    true
                 }
-                pte.set_flags(flags);
-                let new_pte_val = pte.into();
+            },
+            _ => {
+                // todo
+                panic!("big page exist in mapped space,can`t check if is mapped");
+            }
+        }
+    }
+
+    pub fn is_not_mapped_order(&self, vaddr: Vaddr,order:usize)->bool {
+        for i in vaddr.page_addr_iter(order2pages(order)*PAGE_SIZE) {
+            if !self.is_not_mapped(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // 不支持force map，force map可以使用unmap组合实现
+    pub fn map_one_page(&self, vaddr: Vaddr, paddr:Paddr, flags:u8)->Result<(),isize> {
+        trace_sync!("map one page {:#X}=>{:#X}",vaddr.0,paddr.0);
+        let r = self.walk_alloc(vaddr.0);
+        let lock = self.private_pgs.lock_irq().unwrap();
+        match r.level {
+            WalkRetLevelLeaf => {
+                let pte_val = unsafe { get_usize_by_addr(r.pte_addr) };
+                let mut pte = PTE::from(pte_val);
+                let mut new_pte = PTE::default();
+                if pte.vaild() {
+                    return Err(-1);
+                }
+                new_pte.set_ppn_by_paddr(paddr.get_inner());
+                new_pte.set_flags(flags);
+                let new_pte_val = new_pte.into();
                 unsafe { set_usize_by_addr(r.pte_addr, new_pte_val) };
             },
             _ => {
@@ -256,17 +304,24 @@ impl PageTable {
         }
         // clear tlb entry
         unsafe { sfence_vma_vaddr(vaddr.get_inner()); }
+        Ok(())
     }
 
-    // this func can`t check mapped virtual space exist other map.
-    // must check by caller
-    pub fn map_pages(&self, vaddr: Vaddr, paddr: Paddr, order:usize, flags:u8){
+    // if map exist , error return.
+    pub fn map_pages(&self, vaddr: Vaddr, paddr: Paddr, order:usize, flags:u8)->Result<(),isize>{
         let pgs = order2pages(order);
+        for i in vaddr.page_addr_iter(pgs*PAGE_SIZE) {
+            if !self.is_not_mapped(i){
+                return Err(-1);
+            }
+        }
         for i in 0..pgs {
             let append = i*PAGE_SIZE;
-            self.map_one_page(vaddr+append, paddr+append, flags);
+            self.map_one_page(vaddr+append, paddr+append, flags).unwrap();
         }
+        Ok(())
     }
+
     // return the unmap page`s paddr
     // this func is not pub, because unmap one map in
     // a pages block which len is not 1 is not allowed.
@@ -440,4 +495,8 @@ pub fn create_kernel_pagetable()->PageTable{
         private_pgs: SpinLock::new(vec![Arc::new(pg)])
     };
     return kp;
+}
+
+pub fn create_kernel_mm()->MmStruct {
+    MmStruct::new_kern_mm_by_pagetable(create_kernel_pagetable())
 }

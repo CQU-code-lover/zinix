@@ -11,6 +11,7 @@ TARGET = "riscv64gc-unknown-none-elf"
 MODE = "debug" #debug/release
 KERNEL_ELF = "target/"+TARGET+"/"+MODE+"/kernel"
 KERNEL_BIN = KERNEL_ELF+".bin"
+TRACE = False
 
 def mode_update():
     global KERNEL_BIN
@@ -91,11 +92,14 @@ def qemu_pre_build(self):
 def qemu_build(self):
     print("Build Platform:"+self.name)
     self.pre_build(self)
-    if is_debug():
-        # return os.system("cargo build --target targets/riscv64.json")==0
-        return os.system("cargo build")==0
+    build_str = "cargo build --no-default-features"
+    if not is_debug():
+        build_str += " --release"
+    if TRACE:
+        build_str += " --features qemu,debug"
     else:
-        return os.system("cargo build --release")==0
+        build_str += " --features qemu"
+    return os.system(build_str)==0
 
 def qemu_after_build(self):
     if not self.build(self):
@@ -141,8 +145,6 @@ def qemu_run(self,debug):
     if debug:
         cmd += " -S -s"
     os.system(cmd)
-
-
 
 # k210 function
 def k210_clean(self):
@@ -234,6 +236,7 @@ parser = argparse.ArgumentParser()
 run_build_group = parser.add_mutually_exclusive_group()
 parser.add_argument("-p","--platform",help="use --show-platforms option to show support platform list , default "
                                            "platform is qemu",default="qemu")
+parser.add_argument("--trace",help="trace kernel running info",action="store_true")
 parser.add_argument("--release",help="build release version",action="store_true")
 run_build_group.add_argument("-b","--build",help="build project",action="store_true")
 run_build_group.add_argument("-r","--run",help="run project",action="store_true")
@@ -248,6 +251,9 @@ platform = args.platform
 if platforms.get(platform) == None:
     print("platform "+platform+" not find,use --show-platforms option to show platform list")
     exit(-1)
+
+if args.trace:
+    TRACE = True
 
 if args.release:
     MODE = "release"

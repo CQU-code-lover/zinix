@@ -17,7 +17,7 @@ use log::set_max_level;
 use crate::{println, SpinLock, trace_sync};
 use crate::consts::PAGE_SIZE;
 use crate::mm::{_insert_area_for_page_drop, trace_global_buddy};
-use crate::mm::addr::{Addr, OldAddr, PageAlign, PFN, Vaddr};
+use crate::mm::addr::{Addr, OldAddr, Paddr, PageAlign, PFN, Vaddr};
 use crate::pre::{ReadWriteSingleNoOff, InnerAccess, IOReadeWriteSeek, ReadWriteSingleOff};
 use crate::utils::order2pages;
 use crate::sync::SpinLockGuard;
@@ -231,11 +231,10 @@ impl<'a> Iterator for PageInterator<'a> {
     }
 }
 
-impl IoBase for Page { type Error = (); }
 
 // todo support multi page rw
-impl Read for Page {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+impl Page {
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, ()> {
         let pos_now = self.seek(SeekFrom::Current(0)).unwrap();
         let pos_end = (self.get_block_page_cnt() *PAGE_SIZE) as u64;
         let pos_left = (pos_end-pos_now) as usize;
@@ -255,8 +254,8 @@ impl Read for Page {
     }
 }
 
-impl Write for Page {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+impl Page {
+    pub fn write(&self, buf: &[u8]) -> Result<usize, ()> {
         let pos_now = self.seek(SeekFrom::Current(0)).unwrap();
         let pos_end = (self.get_block_page_cnt() *PAGE_SIZE) as u64;
         let pos_left = (pos_end-pos_now) as usize;
@@ -275,18 +274,18 @@ impl Write for Page {
         }
     }
 
-    fn flush(&mut self) -> Result<(), Self::Error> {
+    fn flush(&mut self) -> Result<(), ()> {
         (self.vaddr+self.inner.lock().unwrap().pos).flush()
     }
 }
 
-impl Seek for Page {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
+impl Page {
+    pub fn seek(&self, pos: SeekFrom) -> Result<u64, ()> {
         let mut inner = self.inner.lock().unwrap();
         let max_pos = (inner.friends.len() +1)*PAGE_SIZE ;
         match pos {
             SeekFrom::Start(v) => {
-                if v<(max_pos as u64){
+                if v<=(max_pos as u64){
                     inner.pos = v as usize;
                     Ok(inner.pos as u64)
                 }else{
@@ -300,7 +299,7 @@ impl Seek for Page {
                         Err(())
                     }
                     Some(s) => {
-                        if s>=max_pos || s<0 {
+                        if s>max_pos || s<0 {
                             Err(())
                         } else {
                             inner.pos = s;
@@ -316,7 +315,7 @@ impl Seek for Page {
                         Err(())
                     }
                     Some(s) => {
-                        if s>=max_pos || s<0 {
+                        if s>max_pos || s<0 {
                             Err(())
                         } else {
                             inner.pos = s;
@@ -328,8 +327,6 @@ impl Seek for Page {
         }
     }
 }
-
-impl IOReadeWriteSeek for Page {}
 
 impl<T:Copy> ReadWriteSingleOff<T> for Page {
     unsafe fn write_single_off(&self, val: T, off: usize) -> Option<()> {
@@ -422,6 +419,9 @@ impl Page {
     }
     pub fn get_vaddr(&self) ->Vaddr {
         self.vaddr
+    }
+    pub fn get_paddr(&self) -> Paddr{
+        self.vaddr.into()
     }
     // can`t use in page`s Drop
     pub fn is_leader(&self)->bool {

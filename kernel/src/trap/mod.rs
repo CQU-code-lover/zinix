@@ -129,6 +129,21 @@ impl TrapFrame {
     pub fn err(&mut self){
         self.x10 = (-1 as i64) as usize;
     }
+    pub fn arg0(&self)->usize{
+        self.x10
+    }
+    pub fn arg1(&self)->usize{
+        self.x11
+    }
+    pub fn arg2(&self)->usize{
+        self.x12
+    }
+    pub fn arg3(&self)->usize{
+        self.x13
+    }
+    pub fn arg4(&self)->usize{
+        self.x14
+    }
 }
 
 #[no_mangle]
@@ -221,9 +236,13 @@ fn exc_handler(trap_frame:&mut TrapFrame){
                         panic!("load pg fault");
                     }
                     Exception::StorePageFault => {
-                        let vaddr = r_stval();
-                        let pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte();
-                        println!("{:#b}", pte.flags);
+                        // let vaddr = r_stval();
+                        // let pte  = if get_running().lock_irq().unwrap().mm.is_some() {
+                        //      get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte()
+                        // } else {
+                        //     get_kernel_pagetable().lock_irq().as_ref().unwrap().walk(vaddr).unwrap().get_pte()
+                        // };
+                        // println!("{:#b}", pte.flags);
                         panic!("store pg fault");
                     }
                     Exception::Unknown => {

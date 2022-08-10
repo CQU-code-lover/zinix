@@ -98,3 +98,7 @@ impl<T:?Sized> DerefMut for SpinLockGuard<'_,T> {
         unsafe {&mut *self.spinlock.data.get()}
     }
 }
+
+pub fn get_irq_lock()->SpinLock<u8> {
+    SpinLock::new(0u8)
+}

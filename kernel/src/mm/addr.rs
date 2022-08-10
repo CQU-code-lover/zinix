@@ -174,7 +174,6 @@ impl PageAlign for Paddr {
     fn align(&mut self) {
         self.0 = self.floor().get_inner();
     }
-
     fn is_align_n(&self, n: usize)->bool {
         self.get_inner()%n == 0
     }
@@ -428,6 +427,7 @@ impl Vaddr {
     pub fn page_addr_iter(&self,len:usize)->AddrIterator<Self>{
         self.addr_iter(len,self.get_page_align())
     }
+
 }
 
 impl<T:Copy> ReadWriteSingleNoOff<T> for Vaddr{

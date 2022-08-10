@@ -4,14 +4,19 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::default::Default;
+use core::fmt::{Debug, Formatter};
+use core::mem::size_of;
+use fatfs::{Read, Seek, SeekFrom, Write};
 use crate::consts::PAGE_SIZE;
 
 use crate::mm::addr::{OldAddr, Paddr, PageAlign, Vaddr};
+use crate::mm::alloc_one_page;
 use crate::utils::order2pages;
 use crate::mm::mm::MmStruct;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{PageTable, PTEFlags};
-use crate::SpinLock;
+use crate::pre::{ReadWriteOffUnsafe, ReadWriteSingleNoOff, ReadWriteSingleOff};
+use crate::{println, SpinLock};
 
 bitflags! {
     pub struct VMAFlags: u8 {
@@ -28,6 +33,14 @@ pub struct VMA{
     end_vaddr: Vaddr,
     vm_flags:u8,
     inner:SpinLock<VMAMutInner>
+}
+
+impl Debug for VMA {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        writeln!(f,"range:{:#X}=>{:#X}",self.start_vaddr.0,self.end_vaddr.0);
+        writeln!(f,"flags:{:b}",self.vm_flags);
+        Ok(())
+    }
 }
 
 struct VMAMutInner{
@@ -88,6 +101,8 @@ impl VMA {
     // 为什么要返回错误值？ 可能出现映射区域超出vma范围情况
     // 输入参数要求，vaddr align && vaddr in vma
     // 可能的错误： -1 映射物理页超出vma范围
+    //           -1 虚拟页存在映射
+    // todo 支持force map
     pub fn map_pages(&self, pages:Arc<Page>, vaddr: Vaddr)->Result<(),isize>{
         debug_assert!(vaddr.is_align());
         debug_assert!(self.in_vma(vaddr));
@@ -99,7 +114,10 @@ impl VMA {
         // do map in pagetable
         // vma flags to pte flags
         let pte_flags = _vma_flags_2_pte_flags(self.get_flags());
-        inner.pagetable.as_ref().unwrap().map_pages(vaddr,pages.get_vaddr().into(),pages.get_order(),pte_flags);
+        if !inner.pagetable.as_ref().unwrap().is_not_mapped_order(vaddr,pages.get_order()){
+            return Err(-1);
+        }
+        inner.pagetable.as_ref().unwrap().map_pages(vaddr,pages.get_vaddr().into(),pages.get_order(),pte_flags).unwrap();
         inner.phy_pgs_cnt += pgs_cnt;
         inner.pages.push_back(pages);
         Ok(())
@@ -129,5 +147,104 @@ impl VMA {
     }
     pub fn get_flags(&self)->u8{
         self.vm_flags
+    }
+    // 相对map pages来说在存在映射时可以不分配物理页并且跳过，这样速度更快
+    pub fn fast_alloc_one_page(&self,vaddr:Vaddr){
+        assert!(self.in_vma(vaddr));
+        let mut inner = self.inner.lock_irq().unwrap();
+        if inner.pagetable.as_ref().unwrap().is_not_mapped(vaddr) {
+            let pages = alloc_one_page().unwrap();
+            inner.pagetable.as_ref().unwrap().map_one_page(vaddr, pages.get_paddr(), _vma_flags_2_pte_flags(self.get_flags()));
+            inner.pages.push_back(pages);
+        }
+    }
+    // 注意这个分配物理页不一定是连续的
+    pub fn fast_alloc_pages(&self,vaddr:Vaddr,order:usize){
+        for i in vaddr.page_addr_iter(order2pages(order)*PAGE_SIZE){
+            self.fast_alloc_one_page(i);
+        }
+    }
+    pub fn find_page(&self,vaddr:Vaddr)->Option<Arc<Page>> {
+        for i in self.inner.lock_irq().unwrap().pages.iter(){
+            if i.get_vaddr() == vaddr {
+                return Some(i.clone());
+            }
+        }
+        return None;
+    }
+    pub fn fast_alloc_one_page_and_get(&self,vaddr:Vaddr)->Arc<Page>{
+        assert!(self.in_vma(vaddr));
+        let mut inner = self.inner.lock_irq().unwrap();
+        if inner.pagetable.as_ref().unwrap().is_not_mapped(vaddr) {
+            let pages = alloc_one_page().unwrap();
+            inner.pagetable.as_ref().unwrap().map_one_page(vaddr, pages.get_paddr(), self.get_flags());
+            inner.pages.push_back(pages.clone());
+            return pages;
+        } else {
+            let kavddr = inner.pagetable.as_ref().unwrap().get_kvaddr_by_uvaddr(vaddr).unwrap();
+            for i in inner.pages.iter() {
+                if i.get_vaddr() == kavddr {
+                    return i.clone();
+                }
+            }
+            panic!("can`t find mapped page");
+        }
+    }
+}
+
+// todo 安全性 是否需要加锁才能访问page
+impl ReadWriteOffUnsafe<u8> for VMA {
+    unsafe fn read_off(&self, buf: &mut [u8], off: usize) -> usize {
+        let size = 1;
+        let buf_size = buf.len() * size;
+        assert!(Vaddr(off).is_align_n(size));
+        assert!(self.start_vaddr+buf_size+off < self.end_vaddr);
+        assert!(self.start_vaddr+off < self.end_vaddr);
+        let start = self.start_vaddr;
+        let mut page_now = self.fast_alloc_one_page_and_get(start);
+        page_now.seek(SeekFrom::Start(off as u64));
+        let mut buf_index:usize = 0;
+        while buf_index < buf.len() {
+            let read_len = page_now.read(&mut buf[buf_index..]).unwrap();
+            if read_len == 0 {
+                // change pages
+                let vaddr_now = start+off + buf_index*size;
+                if buf_index!=buf.len(){
+                    assert!(vaddr_now.is_align());
+                }
+                page_now = self.fast_alloc_one_page_and_get(vaddr_now);
+                page_now.seek(SeekFrom::Start(0));
+            } else {
+                buf_index+=read_len;
+            }
+        }
+        buf_size
+    }
+
+    unsafe fn write_off(&self, buf: &[u8], off: usize) -> usize {
+        let size = 1;
+        let buf_size = buf.len() * size;
+        assert!(Vaddr(off).is_align_n(size));
+        assert!(self.start_vaddr+buf_size+off < self.end_vaddr);
+        assert!(self.start_vaddr+off < self.end_vaddr);
+        let start = self.start_vaddr;
+        let mut page_now = self.fast_alloc_one_page_and_get(start);
+        page_now.seek(SeekFrom::Start(off as u64));
+        let mut buf_index:usize = 0;
+        while buf_index < buf.len() {
+            let write_len = page_now.write(&buf[buf_index..]).unwrap();
+            if write_len == 0 {
+                // change pages
+                let vaddr_now = start+off + buf_index*size;
+                if buf_index!=buf.len(){
+                    assert!(vaddr_now.is_align());
+                }
+                page_now = self.fast_alloc_one_page_and_get(vaddr_now);
+                page_now.seek(SeekFrom::Start(0));
+            } else {
+                buf_index+= write_len;
+            }
+        }
+        buf_size
     }
 }

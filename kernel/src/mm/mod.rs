@@ -18,8 +18,9 @@ use crate::{consts, info_sync, println, SpinLock, trace_sync};
 use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, PHY_MEM_START};
 use crate::mm::addr::{addr_test, OldAddr, PageAlign, PFN, Vaddr};
 use crate::mm::bitmap::bitmap_test;
+use crate::mm::mm::MmStruct;
 use crate::mm::page::Page;
-use crate::mm::pagetable::{PTE, PTEFlags};
+use crate::mm::pagetable::{create_kernel_mm, PTE, PTEFlags};
 use crate::sbi::shutdown;
 use crate::sync::SpinLockGuard;
 use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
@@ -34,12 +35,15 @@ pub(crate) mod mm;
 pub(crate) mod aux;
 
 const k210_mem_mb:u32 = 6;
-const qemu_mem_mb:u32 = 6;
+const qemu_mem_mb:u32 = 128;
 
 const BitmapBits:usize = 4096;
 const BitmapOneMax:usize = 1024;
 const BitmapCnt:usize = BitmapBits/BitmapOneMax;
+#[cfg(feature = "k210")]
 const HeapPages:usize = 40;
+#[cfg(feature = "qemu")]
+const HeapPages:usize = 1024;
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -55,13 +59,10 @@ extern "C" {
 }
 
 lazy_static!{
-    static ref KERNEL_PAGETABLE:Arc<SpinLock<PageTable>> = Arc::new(SpinLock::new(create_kernel_pagetable()));
+    // static ref KERNEL_PAGETABLE:Arc<SpinLock<PageTable>> = Arc::new(SpinLock::new(create_kernel_pagetable()));
     static ref BUDDY_ALLOCATOR:SpinLock<BuddyAllocator> = SpinLock::new(Default::default());
     static ref PAGES_MANAGER:SpinLock<PagesManager> = SpinLock::new(Default::default());
-}
-
-pub unsafe fn kernel_pagetable_flush(){
-    KERNEL_PAGETABLE.lock().unwrap().flush_self();
+    static ref KERNEL_MM:Arc<SpinLock<MmStruct>> = Arc::new(SpinLock::new(create_kernel_mm()));
 }
 
 pub fn trace_global_buddy(){
@@ -69,8 +70,12 @@ pub fn trace_global_buddy(){
     trace_sync!("{:?}",b);
 }
 
-pub fn get_kernel_pagetable()->Arc<SpinLock<PageTable>>{
-    KERNEL_PAGETABLE.clone()
+pub fn get_kernel_pagetable()->Arc<PageTable>{
+    KERNEL_MM.lock_irq().unwrap().pagetable.clone()
+}
+
+pub fn get_kernel_mm()->SpinLockGuard<'static,MmStruct> {
+    KERNEL_MM.lock_irq().unwrap()
 }
 
 fn page_init(start_addr: Vaddr, end_addr: Vaddr){
@@ -82,12 +87,12 @@ fn buddy_init(start_addr: Vaddr, end_addr: Vaddr){
 }
 
 fn hardware_address_map_init(){
-    let lock = KERNEL_PAGETABLE.lock().unwrap();
+    let pgt = get_kernel_pagetable();
     let flags = PTEFlags::V.bits()| PTEFlags::R.bits()| PTEFlags::W.bits()| PTEFlags::X.bits();
     #[cfg(feature = "qemu")]
     {
         for i in 0x10001..0x10300{
-           lock._force_map_one(0+PAGE_SIZE*i, 0+PAGE_SIZE*i,0xcf);
+           pgt._force_map_one(0+PAGE_SIZE*i, 0+PAGE_SIZE*i, 0xcf);
         }
     }
     trace_sync!("map virt ok");
@@ -106,7 +111,12 @@ pub fn mm_init(){
     }
     info_sync!("Heap Allocator Init OK!");
     // init PAGE FRAME ALLOCATOR
-    let emem = (qemu_mem_mb as usize)*1024*1024+PHY_MEM_START;
+    #[cfg(feature = "qemu")]
+    let mbs = qemu_mem_mb;
+    #[cfg(feature = "k210")]
+    let mbs = k210_mem_mb;
+
+    let emem = (mbs as usize)*1024*1024+PHY_MEM_START;
     let mut s_addr = Vaddr(new_ek);
     let mut e_addr = Vaddr(emem);
     s_addr = s_addr.ceil();

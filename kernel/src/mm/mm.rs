@@ -7,7 +7,7 @@ use core::fmt::{Debug, Formatter};
 use xmas_elf::ElfFile;
 use xmas_elf::program::Type::Load;
 
-use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET, USER_HEAP_SIZE_NR_PAGES, USER_SPACE_END, USER_SPACE_START, USER_STACK_MAX_ADDR, USER_STACK_SIZE_NR_PAGES};
+use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET, TMMAP_END, TMMAP_START, USER_HEAP_SIZE_NR_PAGES, USER_SPACE_END, USER_SPACE_START, USER_STACK_MAX_ADDR, USER_STACK_SIZE_NR_PAGES};
 use crate::mm::addr::{PageAlign, PFN, Vaddr};
 use crate::mm::{alloc_one_page, alloc_pages, get_kernel_pagetable};
 use crate::mm::aux::{AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_HWCAP, AT_NOTELF, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM, AT_SECURE, AT_UID, AuxHeader, make_auxv};
@@ -15,12 +15,14 @@ use crate::utils::order2pages;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{PageTable, PTEFlags, WalkRet};
 use crate::mm::vma::{VMA, VMAFlags};
+use crate::pre::{ReadWriteOffUnsafe, ReadWriteSingleNoOff};
 use crate::println;
 use crate::sbi::shutdown;
 
 const VMA_CACHE_MAX:usize = 10;
 
 pub struct MmStruct{
+    is_kern:bool,
     vma_cache:VmaCache,
     pub pagetable:Arc<PageTable>,
     vmas : LinkedList<Arc<VMA>>
@@ -42,13 +44,38 @@ pub struct VmaCache {
 }
 
 impl MmStruct {
-    pub fn new_empty() ->Self{
+    pub fn new_kern_mm_by_pagetable(pagetable:PageTable)->Self{
         MmStruct{
+            is_kern: true,
+            vma_cache: VmaCache::new(),
+            pagetable: Arc::new(pagetable),
+            vmas: Default::default()
+        }
+    }
+    pub fn new_empty_user_mm() ->Self{
+        MmStruct{
+            is_kern:false,
             vma_cache: VmaCache::new(),
             pagetable: Arc::new(PageTable::new_user()),
             vmas: Default::default()
         }
     }
+    // 这个函数调试使用，未分配物理页的地址会panic
+    pub unsafe fn _read_single_by_vaddr<T:Copy+Sized>(&self,vaddr:Vaddr)->T{
+        let vv = self.pagetable.get_kvaddr_by_uvaddr(vaddr);
+        if vv.is_none(){
+            println!("1");
+        }
+        let vaddr = vv.unwrap();
+        vaddr.read_single().unwrap()
+    }
+    pub fn is_kern(&self)->bool{
+        self.is_kern
+    }
+    pub fn is_user(&self)->bool{
+        !self.is_kern
+    }
+
     pub fn find_vma(&mut self, vaddr: Vaddr) ->Option<Arc<VMA>>{
         let check_ret = self.vma_cache.check(vaddr);
         match  check_ret{
@@ -106,10 +133,11 @@ impl MmStruct {
         panic!("_insert_vma Bug");
     }
     // arg len not check
-    fn _get_unmapped_area_assign(&mut self, len:usize, flags:u8, vaddr: Vaddr) ->Option<Arc<VMA>>{
+    // helper func, can be only invoked by get_unmapped_area_no_insert
+    // vaddr=>vaddr+len must in map space, checked by caller
+    fn _get_unmapped_area_assign_no_insert(&mut self, len:usize, flags:u8, vaddr: Vaddr) ->Option<Arc<VMA>>{
         assert!(vaddr.is_align());
         let mut ret :Option<Arc<VMA>> = None;
-        // todo! check mm range
         if self.vmas.is_empty() {
             return  Some(VMA::new(
                 vaddr,
@@ -130,7 +158,6 @@ impl MmStruct {
             match cursor.peek_next() {
                 None => {
                     // cur is last node
-                    // todo check Mm range
                     ret = Some(VMA::new(
                         vaddr,
                         vaddr+ len,
@@ -160,19 +187,33 @@ impl MmStruct {
     }
 
     // must page align
-    pub fn get_unmapped_area(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>) ->Option<Arc<VMA>>{
+    // will do check of mm range
+    // core function
+    pub fn _get_unmapped_area_no_insert(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>) ->Option<Arc<VMA>>{
         // check len
-        if len%PAGE_SIZE!=0{
-            panic!("get_unmapped_area fail, len is not page align");
-        }
-
+        assert_eq!(len % PAGE_SIZE, 0);
+        let (space_start,space_end) = if self.is_kern(){
+            (Vaddr(TMMAP_START),Vaddr(TMMAP_END))
+        } else {
+            (Vaddr(USER_SPACE_START),Vaddr(USER_SPACE_END))
+        };
         if vaddr.is_some(){
-            return self._get_unmapped_area_assign(len,flags,vaddr.unwrap());
+            assert!(vaddr.as_ref().unwrap().is_align());
+            let vaddr_inner = vaddr.unwrap();
+            if vaddr_inner>=space_start&&vaddr_inner<space_end {
+                return self._get_unmapped_area_assign_no_insert(len, flags, vaddr_inner);
+            } else {
+                return None;
+            }
         }
         if self.vmas.is_empty() {
             return  Some(VMA::new(
-                Vaddr(USER_SPACE_START),
-                Vaddr(USER_SPACE_START)+ len,
+                space_start,
+                {let end = space_start + len;
+                    if end>=space_end {
+                        return None;
+                    }
+                    end},
                 self.pagetable.clone(),
                 flags,
             ));
@@ -191,7 +232,13 @@ impl MmStruct {
                     // todo check Mm range
                     ret = Some(VMA::new(
                         cur_end_addr,
-                        cur_end_addr+ len,
+                        {
+                            let end = cur_end_addr+ len;
+                            if end>=space_end{
+                                return None;
+                            }
+                            end
+                        },
                         self.pagetable.clone(),
                         flags
                     ));
@@ -214,91 +261,115 @@ impl MmStruct {
         }
         ret
     }
-    pub fn get_unmapped_area_and_write(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>, data:Option<&[u8]>, offset :usize) ->Option<Arc<VMA>>{
-        let vma = self.get_unmapped_area(len,flags,vaddr).map(|x|{
-            self._insert_vma(x.clone());
-            x
-        });
-        if data.is_some() {
-            let s = vma.as_ref().unwrap().get_start_vaddr();
-            let mut pos:usize = 0;
-            let data_inner = data.unwrap();
-            let mut first_pg = true;
-            let mut in_page_offset = offset;
-            for i in s.page_addr_iter(Vaddr(data_inner.len()+offset).ceil().0){
-                self.alloc_phy_pages_check(i,0,|addr,len|{
-                    let write_buf = &data_inner[pos..];
-                    let real_write =  if first_pg {
-                        min(PAGE_SIZE-offset,write_buf.len())
-                    } else {
-                        min(PAGE_SIZE,write_buf.len())
-                    };
-                    for j in 0..real_write{
-                        unsafe {
-                            *((addr.0+in_page_offset+j) as *mut u8) = write_buf[j];
-                        }
-                    }
-                });
-                in_page_offset =0;
-                if first_pg {
-                    pos += PAGE_SIZE-offset;
-                    first_pg = false;
-                } else {
-                    pos += PAGE_SIZE;
-                }
-                if pos>=data_inner.len(){
-                    break;
-                }
-            }
-        }
-        vma
+
+    // len/vaddr必须align
+    // 会自动插入area
+    pub fn get_unmapped_area(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>) ->Option<Arc<VMA>> {
+        self._get_unmapped_area_no_insert(len, flags, vaddr).map(|area|{
+            self._insert_vma(area.clone());
+            area
+        })
     }
-    pub fn alloc_phy_pages_no_check<F>(&mut self, vaddr: Vaddr, order:usize, f:F) ->Result<(),isize>
-    where
-        F:FnOnce(Vaddr,usize)->()
-    {
-        if !vaddr.is_align() {
-            return Err(-1);
-        }
-        let page_cnt = order2pages(order);
-        if page_cnt==0 {
-            return Err(-1);
-        }
-        match self.find_vma(vaddr) {
-            None => {
-                // vma is not allocated for this vaddr
-                Err(-1)
+
+    pub fn get_unmapped_area_alloc(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>) ->Option<Arc<VMA>>{
+        self.get_unmapped_area(len,flags,vaddr).map(|area|{
+            let addr_ = if vaddr.is_some(){
+                vaddr.unwrap()
+            } else {
+                area.get_start_vaddr()
+            };
+            for i in addr_.page_addr_iter(len){
+                area.fast_alloc_one_page(i);
             }
-            Some(vma) => {
-                let pages = alloc_pages(order).unwrap();
-                let allocated_pages_vaddr: Vaddr = pages.get_vaddr();
-                f(allocated_pages_vaddr, page_cnt*PAGE_SIZE);
-                vma.map_pages(pages, vaddr);
-                Ok(())
-            }
-        }
+            area
+        })
     }
-    pub fn alloc_phy_pages_check<F>(&mut self, vaddr: Vaddr, order:usize, f:F) ->Result<(),isize>
-    where
-        F:FnOnce(Vaddr,usize)->()
-    {
-        match self.pagetable.walk(vaddr.0){
-            None => {
-                // ok
-                self.alloc_phy_pages_no_check(vaddr,order,f)
-            }
-            Some(walk) => {
-                // last level
-                if walk.get_level()==2 {
-                    // ok
-                    self.alloc_phy_pages_no_check(vaddr,order,f)
-                } else {
-                    // big page
-                    Err(-1)
-                }
-            }
-        }
-    }
+
+    // pub fn get_unmapped_area_and_write(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>, data:Option<&[u8]>, offset :usize) ->Option<Arc<VMA>>{
+    //     let vma = self.get_unmapped_area(len,flags,vaddr).map(|x|{
+    //         self._insert_vma(x.clone());
+    //         x
+    //     });
+    //     if data.is_some() {
+    //         let s = vma.as_ref().unwrap().get_start_vaddr();
+    //         let mut pos:usize = 0;
+    //         let data_inner = data.unwrap();
+    //         let mut first_pg = true;
+    //         let mut in_page_offset = offset;
+    //         for i in s.page_addr_iter(Vaddr(data_inner.len()+offset).ceil().0){
+    //             self.alloc_phy_pages_check(i,0,|addr,len|{
+    //                 let write_buf = &data_inner[pos..];
+    //                 let real_write =  if first_pg {
+    //                     min(PAGE_SIZE-offset,write_buf.len())
+    //                 } else {
+    //                     min(PAGE_SIZE,write_buf.len())
+    //                 };
+    //                 for j in 0..real_write{
+    //                     unsafe {
+    //                         *((addr.0+in_page_offset+j) as *mut u8) = write_buf[j];
+    //                     }
+    //                 }
+    //             });
+    //             in_page_offset =0;
+    //             if first_pg {
+    //                 pos += PAGE_SIZE-offset;
+    //                 first_pg = false;
+    //             } else {
+    //                 pos += PAGE_SIZE;
+    //             }
+    //             if pos>=data_inner.len(){
+    //                 break;
+    //             }
+    //         }
+    //     }
+    //     vma
+    // }
+    // pub fn alloc_phy_pages_no_check<F>(&mut self, vaddr: Vaddr, order:usize, f:F) ->Result<(),isize>
+    // where
+    //     F:FnOnce(Vaddr,usize)->()
+    // {
+    //     if !vaddr.is_align() {
+    //         return Err(-1);
+    //     }
+    //     let page_cnt = order2pages(order);
+    //     if page_cnt==0 {
+    //         return Err(-1);
+    //     }
+    //     match self.find_vma(vaddr) {
+    //         None => {
+    //             // vma is not allocated for this vaddr
+    //             Err(-1)
+    //         }
+    //         Some(vma) => {
+    //             let pages = alloc_pages(order).unwrap();
+    //             let allocated_pages_vaddr: Vaddr = pages.get_vaddr();
+    //             f(allocated_pages_vaddr, page_cnt*PAGE_SIZE);
+    //             vma.map_pages(pages, vaddr);
+    //             Ok(())
+    //         }
+    //     }
+    // }
+    // pub fn alloc_phy_pages_check<F>(&mut self, vaddr: Vaddr, order:usize, f:F) ->Result<(),isize>
+    // where
+    //     F:FnOnce(Vaddr,usize)->()
+    // {
+    //     match self.pagetable.walk(vaddr.0){
+    //         None => {
+    //             // ok
+    //             self.alloc_phy_pages_no_check(vaddr,order,f)
+    //         }
+    //         Some(walk) => {
+    //             // last level
+    //             if walk.get_level()==2 {
+    //                 // ok
+    //                 self.alloc_phy_pages_no_check(vaddr,order,f)
+    //             } else {
+    //                 // big page
+    //                 Err(-1)
+    //             }
+    //         }
+    //     }
+    // }
     // 只能在页表已经install的时候使用
     pub unsafe fn flush(&self){
         self.pagetable.flush_self();
@@ -307,7 +378,7 @@ impl MmStruct {
         self.pagetable.install();
     }
     pub fn new_from_elf(elf_bytes:&[u8]) ->(Self, Vec<AuxHeader>, usize){
-        let mut mm = Self::new_empty();
+        let mut mm = Self::new_empty_user_mm();
         let elf = ElfFile::new(elf_bytes).unwrap();
         let elf_header = elf.header;
         assert_eq!([0x7f, 0x45, 0x4c, 0x46],elf_header.pt1.magic);
@@ -366,44 +437,38 @@ impl MmStruct {
                 if ph_flags.is_execute() {
                     vma_flags|=VMAFlags::VM_EXEC.bits();
                 }
-                let a2 = elf.header.pt2.entry_point();
-                let area = mm.get_unmapped_area_and_write(
-                    size_aligned,
-                    vma_flags,
-                    Some(s_addr),
-                    Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
-                    offset
-                ).unwrap();
 
+                let mut area = mm.get_unmapped_area_alloc(size_aligned, vma_flags, Some(s_addr)).unwrap();
+
+                unsafe { area.write_off(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize] ,offset);}
                 load_end = max(load_end,area.get_end_vaddr());
             }
         }
-
         // heap
         let heap_start = load_end.ceil()+ PAGE_SIZE;
-        mm.get_unmapped_area_and_write(
-            USER_HEAP_SIZE_NR_PAGES*PAGE_SIZE,
-            VMAFlags::VM_READ.bits()|VMAFlags::VM_WRITE.bits()|VMAFlags::VM_USER.bits(),
-            Some(heap_start),
-            None,
-            0
-        ).unwrap();
-        // let re = get_kernel_pagetable().lock().unwrap().walk(0x3000).unwrap();
-        mm.alloc_phy_pages_check(heap_start,4,
-                                 |x,y| {}
-        );
 
-        mm.get_unmapped_area_and_write(
+        mm.get_unmapped_area(USER_HEAP_SIZE_NR_PAGES*PAGE_SIZE,
+                             VMAFlags::VM_READ.bits()|VMAFlags::VM_WRITE.bits()|VMAFlags::VM_USER.bits(),
+                             Some(heap_start)
+        ).unwrap();
+
+        // let v_ = mm.pagetable.get_kvaddr_by_uvaddr(Vaddr(0x277B0)).unwrap();
+        // let vv:usize  = unsafe{v_.read_single()}.unwrap();
+        // println!("{:#X}",vv);
+        // shutdown();
+        // mm.alloc_phy_pages_check(heap_start,4,
+        //                          |x,y| {}
+        // );
+
+        mm.get_unmapped_area_alloc(
             USER_STACK_SIZE_NR_PAGES*PAGE_SIZE,
             VMAFlags::VM_READ.bits()|VMAFlags::VM_WRITE.bits()|VMAFlags::VM_USER.bits(),
             Some(Vaddr(USER_STACK_MAX_ADDR-(USER_STACK_SIZE_NR_PAGES*PAGE_SIZE))),
-            None,
-            0
         ).unwrap();
         // alloc all phy page for user stack
-        mm.alloc_phy_pages_check(Vaddr(USER_STACK_MAX_ADDR-(USER_STACK_SIZE_NR_PAGES*PAGE_SIZE)), 4,
-                                 |x,y| {}
-        );
+        // mm.alloc_phy_pages_check(Vaddr(USER_STACK_MAX_ADDR-(USER_STACK_SIZE_NR_PAGES*PAGE_SIZE)), 4,
+        //                          |x,y| {}
+        // );
         (mm,auxv,elf.header.pt2.entry_point() as usize)
     }
 }

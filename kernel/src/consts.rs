@@ -9,6 +9,9 @@ pub const  USER_STACK_SIZE_NR_PAGES:usize = 16;
 pub const  USER_STACK_SIZE_ORDER:usize = 4;
 // pub const  USER_STACK_MAX_ADDR:usize = 0x4000000000;
 pub const  USER_STACK_MAX_ADDR:usize = 0x10000000;
+// kernel template map :4GB
+pub static TMMAP_START:usize = 0xffffffc600000000;
+pub static TMMAP_END:usize = 0xffffffc700000000;
 // vmemmap : 4GB
 pub static VMEMMAP_START:usize = 0xffffffc700000000;
 pub static VMEMMAP_END:usize = 0xffffffc800000000;

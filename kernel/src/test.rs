@@ -1,9 +1,9 @@
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use fatfs::{FsOptions, IntoStorage, Read, Seek, SeekFrom, Write};
 use riscv::register::sstatus::Sstatus;
 use xmas_elf::ElfFile;
-use crate::io::virtio::VirtioDev;
+use crate::io::virtio::{virtio_test, VirtioDev};
 use crate::mm::addr::OldAddr;
 use crate::mm::{alloc_pages, get_kernel_pagetable, mm_test};
 use crate::{info_sync, println, Task};
@@ -17,6 +17,9 @@ use crate::sbi::shutdown;
 pub unsafe fn do_test(){
     // mm_test();
     // Task::create_user_task_and_run("1.o",vec![]);
-    Task::create_user_task_and_run("entry-static.exe",vec![]);
+    // virtio_test();
     // shutdown();
+    // Task::create_user_task_and_run("entry-static.exe",vec!["statvfs".to_string()]);
+    // shutdown();
+    Task::create_user_task_and_run("busybox_unstripped",vec!["busybox".to_string(),"cat".to_string(),"1.o".to_string()]);
 }

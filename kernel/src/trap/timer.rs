@@ -1,5 +1,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
+use log::info;
 use riscv::register::time;
+use crate::info_sync;
 use crate::sbi::set_timer;
 use crate::task::scheduler;
 use crate::trap::TrapFrame;

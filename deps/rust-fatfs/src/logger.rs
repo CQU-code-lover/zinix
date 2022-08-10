@@ -74,9 +74,9 @@ impl log::Log for EarlyLogger {
 
 
 pub fn fatfs_early_logger_init(){
-    static EARLY_LOGGER: EarlyLogger = EarlyLogger;
-    log::set_logger(&EARLY_LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
-    log::set_max_level(LevelFilter::Trace);
+    // static EARLY_LOGGER: EarlyLogger = EarlyLogger;
+    // log::set_logger(&EARLY_LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
+    // log::set_max_level(LevelFilter::Error);
     // info_sync!("123");
     // debug_sync!("123");
     // trace_sync!("123");

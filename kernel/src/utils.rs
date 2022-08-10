@@ -1,6 +1,9 @@
+use alloc::string::String;
 use core::ptr::{addr_of, addr_of_mut};
 use log::error;
 use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
+use crate::mm::addr::Vaddr;
+use crate::pre::InnerAccess;
 
 pub fn addr_page_align_upper(addr:usize) ->usize{
     let mut ret = addr-(addr&PAGE_SIZE);
@@ -66,4 +69,22 @@ pub fn pages2order(pages:usize) ->usize{
     }
     error!("pg2order fail");
     return MAX_ORDER;
+}
+
+pub fn convert_cstr_from_ptr(ptr: *const u8) -> String{
+    let mut s = String::new();
+    let mut ptr_probe = ptr as usize;
+    loop {
+        let c = unsafe{*(ptr_probe as *const u8)};
+        if c ==0 {
+            break;
+        }
+        s.push(c as char);
+        ptr_probe +=1;
+    }
+    s
+}
+
+pub fn convert_cstr_from_vaddr(vaddr:Vaddr)->String{
+    convert_cstr_from_ptr(vaddr.get_inner() as *const u8)
 }
