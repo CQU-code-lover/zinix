@@ -16,24 +16,21 @@ bitflags! {
 }
 
 impl OpenFlags {
-    pub fn check_main_flag(&self)->bool{
-        let (f0,f1,f2) = (self.contains(Self::O_RDONLY),self.contains(Self::O_RDWR),self.contains(Self::O_WRONLY));
-        if f0 {
-            !f1 && !f2
-        } else if f1{
-            !f0 && !f2
-        } else if f2{
-            !f0 && !f1
+    pub fn readwriteable(&self)->bool{
+        self.contains(Self::O_RDWR)
+    }
+    pub fn readable(&self)->bool{
+        if self.readwriteable(){
+            true
         } else {
-            false
+            !self.contains(Self::O_WRONLY)
         }
     }
-    pub fn from_bits_checked(v:u32) ->Option<Self> {
-        let f =Self::from_bits(v).unwrap();
-        if f.check_main_flag() {
-            Some(f)
+    pub fn writeable(&self)->bool{
+        if self.readwriteable(){
+            true
         } else {
-            None
+            self.contains(Self::O_WRONLY)
         }
     }
 }

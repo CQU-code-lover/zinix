@@ -77,7 +77,6 @@ impl Inode {
         });
         let mut_ptr = node.as_ref() as *const Inode as *mut Inode;
         unsafe { (*mut_ptr).this = Arc::downgrade(&node); }
-        self.inner.lock_irq().unwrap().children.push_back(Arc::downgrade(&node));
         node
     }
     pub fn _new_file_inode(&self, file:FileAlias<'static>, name:&str) ->Arc<Self>{
@@ -90,7 +89,6 @@ impl Inode {
         });
         let mut_ptr = node.as_ref() as *const Inode as *mut Inode;
         unsafe { (*mut_ptr).this = Arc::downgrade(&node); }
-        self.inner.lock_irq().unwrap().children.push_back(Arc::downgrade(&node));
         node
     }
     pub fn get_dentry(&self)->DirEntryAlias{
@@ -143,9 +141,13 @@ impl Inode {
             }
             Some(s) => {
                 if s.is_dir(){
-                    Some(self._new_dir_inode(s.to_dir(), name))
+                    let new_node = self._new_dir_inode(s.to_dir(), name);
+                    inner.children.push_back(Arc::downgrade(&new_node));
+                    Some(new_node)
                 } else if s.is_file(){
-                    Some(self._new_file_inode(s.to_file(), name))
+                    let new_node = self._new_file_inode(s.to_file(), name);
+                    inner.children.push_back(Arc::downgrade(&new_node));
+                    Some(new_node)
                 } else {
                     None
                 }

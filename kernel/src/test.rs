@@ -8,7 +8,9 @@ use crate::mm::addr::OldAddr;
 use crate::mm::{alloc_pages, get_kernel_pagetable, mm_test};
 use crate::{info_sync, println, Task};
 use crate::asm::{enable_irq, r_sstatus, SSTATUS_SIE};
+use crate::fs::dfile::DFileClass::ClassInode;
 use crate::fs::fat::get_fatfs;
+use crate::fs::inode::Inode;
 use crate::io::BlockRead;
 use crate::io::sdcard::{new_sdcard, SDCardDev};
 use crate::mm::mm::MmStruct;
@@ -21,5 +23,6 @@ pub unsafe fn do_test(){
     // shutdown();
     // Task::create_user_task_and_run("entry-static.exe",vec!["statvfs".to_string()]);
     // shutdown();
+    // Task::create_user_task_and_run("busybox_unstripped",vec!["yes".to_string()]);
     Task::create_user_task_and_run("busybox_unstripped",vec!["busybox".to_string(),"cat".to_string(),"1.o".to_string()]);
 }

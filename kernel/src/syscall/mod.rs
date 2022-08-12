@@ -1,11 +1,13 @@
 mod sys_fs;
+mod sys_proc;
+mod sys_dev;
 
 use alloc::sync::Arc;
 use core::cmp::min;
 use core::mem::size_of;
 use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use fatfs::error;
-use crate::{error_sync, println, trace_sync};
+use crate::{error_sync, info_sync, println, trace_sync};
 use crate::fs::dfile::OldDFile;
 use crate::sbi::shutdown;
 use crate::syscall::sys_fs::syscall_fs_entry;
@@ -90,67 +92,19 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
         SYSCALL_SET_TID_ADDRESS => {
             trap_frame.ok();
         }
-        SYSCALL_WRITEV =>{
-            #[repr(C)]
-            #[derive(Copy,Clone)]
-            struct IOVEC{
-                iov_base:*mut u8,
-                iov_len:usize
-            }
-            let fd = trap_frame.x10;
-            let iov_array_base = trap_frame.x11;
-            let mut len_res = trap_frame.x12;
-            let len_need_read = len_res;
-            let file = get_running().lock_irq().unwrap().get_opened(fd).unwrap();
-            for i in 0..usize::MAX {
-                if len_res <=0{
-                    break;
-                }
-                let iov = *((iov_array_base + i*size_of::<IOVEC>()) as *mut IOVEC);
-                let real_write_len = min(iov.iov_len, len_res);
-                let write_buf= slice_from_raw_parts(iov.iov_base, real_write_len).as_ref().unwrap();
-                assert_eq!(file.inner.lock_irq().unwrap().write(write_buf), real_write_len);
-                len_res -= real_write_len;
-            }
-            trap_frame.ret(len_need_read);
-        }
         SYSCALL_EXIT_GRUOP =>{
             trap_frame.ok();
         }
+        // todo ioctl
         SYSCALL_IOCTL=>{
+            info_sync!("syscall ioctl,trap frame:\n{:?}",trap_frame);
             trap_frame.ok();
         }
         SYSCALL_GETUID=>{
             trap_frame.ret(0);
         }
-        SYSCALL_DUP3=>{
-            let old = trap_frame.x10;
-            let new = trap_frame.x11;
-            let mut running = get_running();
-            let mut lock = running.lock_irq().unwrap();
-            match lock.get_opened(old){
-                None => {
-                    trap_frame.err();
-                    return;
-                }
-                Some(file) => {
-                    lock.set_opend(new, Some(file));
-                    trap_frame.ret(new);
-                    return;
-                }
-            }
-        }
-        SYSCALL_WRITE=>{
-            let fd = trap_frame.x10;
-            let ptr = trap_frame.x11 as *const u8;
-            let len = trap_frame.x12;
-            let buf = slice_from_raw_parts(ptr,len);
-            println!("fd : {}",fd);
-            let file = get_running().lock_irq().unwrap().get_opened(fd).unwrap();
-            assert_eq!(file.inner.lock_irq().unwrap().write(&(*buf)[..]), len);
-            trap_frame.ret(len);
-        }
-        SYSCALL_OPENAT|SYSCALL_SENDFILE => {
+        SYSCALL_OPENAT|SYSCALL_SENDFILE|SYSCALL_WRITEV|SYSCALL_WRITE|SYSCALL_READ|
+        SYSCALL_DUP|SYSCALL_DUP3 => {
             syscall_fs_entry(trap_frame,syscall_id);
         }
         _ => {

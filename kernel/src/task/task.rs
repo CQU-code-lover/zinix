@@ -24,6 +24,7 @@ use xmas_elf::symbol_table::Visibility::Default;
 use crate::fs::dfile::{OldDFile, get_stderr, get_stdin, get_stdout, DFile};
 use crate::fs::dfile::DFILE_TYPE::DFTYPE_STDIN;
 use crate::fs::fat::get_fatfs;
+use crate::fs::fcntl::OpenFlags;
 use crate::fs::get_dentry_from_dir;
 use crate::fs::inode::{ Inode};
 use crate::mm::{alloc_pages, get_kernel_pagetable};
@@ -144,7 +145,7 @@ pub struct Task {
     pub mm: Option<MmStruct>,
     opened: Vec<Option<Arc<DFile>>>,
     pwd:String,
-    pub pwd_dfile:Option<DFile>,
+    pub pwd_dfile:Arc<DFile>,
 }
 
 fn get_init_pwd()->String {
@@ -177,7 +178,7 @@ impl Task {
             mm: None,
             opened: vec![None;MAX_OPENED],
             pwd:get_init_pwd(),
-            pwd_dfile:None
+            pwd_dfile:DFile::get_root()
         };
         sscratch::write(0);
         unsafe {
@@ -194,16 +195,16 @@ impl Task {
     pub fn set_status(&mut self,status :TaskStatus) {
         self.status = status;
     }
-    pub fn get_opened(&self, fd:usize) ->Option<Arc<DFile>>{
+    pub fn get_opened(&mut self, fd:usize) ->Option<Arc<DFile>>{
         if fd < self.opened.len() {
-            self.opened[fd].as_ref().map(|x|{
+            self.opened[fd].as_mut().map(|x|{
                 x.clone()
             })
         } else {
             None
         }
     }
-    pub fn set_opend(&mut self, fd:usize, file:Option<Arc<DFile>>) ->Result<Option<Arc<DFile>>,isize>{
+    pub fn set_opend(&mut self, fd:usize, file:Option<Arc<DFile>>)->Result<Option<Arc<DFile>>,()>{
         if fd < self.opened.len() {
             let ret = self.opened[fd].as_ref().map(|x|{
                 x.clone()
@@ -211,7 +212,7 @@ impl Task {
             self.opened[fd] = file;
             Ok(ret)
         } else {
-            Err(-1)
+            Err(())
         }
     }
     pub fn alloc_opend(&mut self, file:Arc<DFile>) ->Option<usize>{
@@ -227,18 +228,8 @@ impl Task {
         }
         None
     }
-    fn _update_pwd_dfile_from_pwd(&mut self)->Result<(),()>{
-        let s = Inode::get_root().get_node_by_path(&self.pwd);
-        match s {
-            None => {
-                self.pwd_dfile = None;
-                Err(())
-            }
-            Some(n) => {
-                self.pwd_dfile = Some(DFile::from_inode(n));
-                Ok(())
-            }
-        }
+    pub fn get_pwd_opend(&mut self)->Arc<DFile>{
+        self.pwd_dfile.clone()
     }
     pub fn is_kern(&self)->bool {
         match self.mm {
@@ -261,7 +252,7 @@ impl Task {
             mm: None,
             opened:vec![None;MAX_OPENED],
             pwd:get_init_pwd(),
-            pwd_dfile: None
+            pwd_dfile: DFile::get_root()
         };
         tsk.context.ra = kern_trap_ret as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
@@ -276,12 +267,17 @@ impl Task {
     pub fn create_kern_task_and_run(func:fn()){
         add_task(Arc::new(SpinLock::new(Self::create_kern_task(func))))
     }
-    pub unsafe fn create_user_task(path:&str,args:Vec<String>)->Arc<SpinLock<Task>>{
-        let fs_g = get_fatfs();
-        let fs= fs_g.lock_irq().unwrap();
-        let wrapper = get_dentry_from_dir(fs.root_dir(), path).unwrap();
-        let file_len = wrapper.len;
-        let mut f = wrapper.to_file();
+    pub unsafe fn create_user_task(path:&str,args:Vec<String>)->Option<Arc<SpinLock<Task>>>{
+        let node = match Inode::get_root().get_node_by_path(path) {
+            Some(node)=> {
+                node
+            }
+            None=> {
+                return None;
+            }
+        };
+        let file_len = node.get_dentry().len() as usize;
+        let f = DFile::from_inode(node,OpenFlags::O_RDONLY);
         let mut pages_tracer:Vec<Arc<Page>> = Vec::new();
         let max_order_size = PAGE_SIZE*order2pages(MAX_ORDER-1);
         let read_buf = if file_len>max_order_size {
@@ -330,7 +326,7 @@ impl Task {
             mm: Some(mm_struct),
             opened:vec![None;MAX_OPENED],
             pwd:get_init_pwd(),
-            pwd_dfile: Some(DFile::open_root())
+            pwd_dfile: DFile::get_root()
         };
         tsk.opened[0] = Some(Arc::new(DFile::new_stdin()));
         tsk.opened[1] = Some(Arc::new(DFile::new_stdout()));
@@ -477,10 +473,20 @@ impl Task {
         // println!("{:#X}",v);
         // shutdown();
         trace_sync!("add user task OK");
-        Arc::new(SpinLock::new(tsk))
+        Some(Arc::new(SpinLock::new(tsk)))
     }
-    pub unsafe fn create_user_task_and_run(path:&str,args:Vec<String>){
-        add_task(Self::create_user_task(path,args));
+    pub unsafe fn create_user_task_and_run(path:&str,args:Vec<String>)->Result<(),()>{
+        add_task(
+            match Self::create_user_task(path,args) {
+                None => {
+                    return Err(());
+                }
+                Some(tsk) => {
+                    tsk
+                }
+            }
+        );
+        Ok(())
     }
     pub fn pwd_mut_ref(&mut self)->&mut String{
         &mut self.pwd

@@ -38,9 +38,14 @@ impl VirtioDev {
     pub fn new()->Self{
         VirtioDev{
             inner: SpinLock::new(
-                VirtIOBlk::new(
+                match VirtIOBlk::new(
                     unsafe { &mut *(VIRTIO0 as *mut VirtIOHeader) }
-                ).unwrap()
+                ) {
+                    Ok(v) => {v}
+                    Err(e) => {
+                        panic!("{:?}",e);
+                    }
+                }
             )
         }
     }

@@ -6,6 +6,7 @@ use crate::{println, SpinLock};
 use crate::fs::dfile::DFILE_TYPE::*;
 use crate::fs::{DirAlias, FileAlias, get_dentry_from_dir};
 use crate::fs::fat::{BlkStorage, get_fatfs};
+use crate::fs::fcntl::OpenFlags;
 use crate::fs::inode::{Inode};
 use crate::io::virtio::VirtioDev;
 use crate::task::task::get_running;
@@ -75,39 +76,39 @@ impl<'a> DirEntryWrapper<'a> {
 }
 
 pub struct OldDFile {
-    pub inner:SpinLock<DFMUTInner>
+    pub inner:SpinLock<OldDFMutInner>
 }
 
 impl OldDFile {
     pub fn new_io(dftype:DFILE_TYPE) ->Self{
         Self{
-            inner: SpinLock::new(DFMUTInner::new(dftype,String::new()))
+            inner: SpinLock::new(OldDFMutInner::new(dftype, String::new()))
         }
     }
     pub fn new_file(path:String)->Self{
         Self{
-            inner: SpinLock::new(DFMUTInner::new(DFTYPE_FILE,path))
+            inner: SpinLock::new(OldDFMutInner::new(DFTYPE_FILE, path))
         }
     }
     pub fn new_dir(path:String)->Self{
         Self{
-            inner: SpinLock::new(DFMUTInner::new(DFTYPE_DIR,path))
+            inner: SpinLock::new(OldDFMutInner::new(DFTYPE_DIR, path))
         }
     }
     pub fn new_pipe()->Self{
         Self{
-            inner: SpinLock::new(DFMUTInner::new(DFTYPE_PIPE,String::new()))
+            inner: SpinLock::new(OldDFMutInner::new(DFTYPE_PIPE, String::new()))
         }
     }
 }
 
-pub struct DFMUTInner{
+pub struct OldDFMutInner {
     dftype:DFILE_TYPE,
     path:String,
     pos:usize,
 }
 
-impl DFMUTInner {
+impl OldDFMutInner {
     pub fn new(dftype:DFILE_TYPE,path:String)->Self{
         Self{
             dftype,
@@ -223,85 +224,33 @@ impl Terminal {
 }
 
 pub enum DFileClass{
-    Inode(Arc<Inode>),
-    Terminal(Terminal),
+    ClassInode(Arc<Inode>),
+    ClassTerminal(Terminal),
+}
+
+pub struct DFileMutInner{
+    class:DFileClass,
+    pos:usize,
+    open_flags:OpenFlags,
 }
 
 pub struct DFile {
-    class:DFileClass,
-    pos:usize
+    inner:SpinLock<DFileMutInner>
 }
 
-impl DFile {
-    pub fn new_stdin()->Self{
-        Self{
-            class: DFileClass::Terminal(Terminal{
-                ttype: TerminalType::STDIN
-            }),
-            pos: 0
-        }
+impl DFileMutInner {
+    pub fn readable(&self)->bool{
+        self.open_flags.readable()
     }
-    pub fn new_stdout()->Self{
-        Self{
-            class: DFileClass::Terminal(Terminal{
-                ttype: TerminalType::STDOUT
-            }),
-            pos: 0
-        }
-    }
-    pub fn new_stderr()->Self{
-        Self{
-            class: DFileClass::Terminal(Terminal{
-                ttype: TerminalType::STDERR
-            }),
-            pos: 0
-        }
-    }
-    pub fn open_root()->Self{
-        DFile {
-            class: DFileClass::Inode(Inode::get_root()),
-            pos: 0
-        }
-    }
-    pub fn from_inode(inode:Arc<Inode>)->Self{
-        Self{
-            class: DFileClass::Inode(inode),
-            pos: 0
-        }
-    }
-    pub fn open_name(&self,name:&str)->Option<Self>{
-        match &self.class {
-            DFileClass::Inode(inode) => {
-                inode.get_sub_node(name).map(|x| {
-                    Self {
-                        class: DFileClass::Inode(inode.clone()),
-                        pos: 0,
-                    }
-                })
-            }
-            DFileClass::Terminal(_) => {
-                None
-            }
-        }
-    }
-    pub fn open_path(&self,path:&str)->Option<Self>{
-        match &self.class {
-            DFileClass::Inode(inode) => {
-                inode.get_node_by_path(path).map(|x| {
-                    Self {
-                        class: DFileClass::Inode(inode.clone()),
-                        pos: 0,
-                    }
-                })
-            }
-            DFileClass::Terminal(_) => {
-                None
-            }
-        }
+    pub fn writeable(&self)->bool{
+        self.open_flags.writeable()
     }
     pub fn read(&mut self,buf:&mut [u8])->Result<usize,()>{
+        if !self.readable(){
+            return Err(());
+        }
         match &mut self.class {
-            DFileClass::Inode(inode) => {
+            DFileClass::ClassInode(inode) => {
                 if inode.is_file(){
                     inode.read_off(buf,self.pos).map(|x|{
                         self.pos+=x;
@@ -311,7 +260,7 @@ impl DFile {
                     panic!("can`t read dir");
                 }
             }
-            DFileClass::Terminal(t) => {
+            DFileClass::ClassTerminal(t) => {
                 Ok(t.read(buf))
             }
             _ => {
@@ -319,9 +268,12 @@ impl DFile {
             }
         }
     }
-    pub fn write(&mut self,buf:&mut [u8])->Result<usize,()> {
+    pub fn write(&mut self,buf:&[u8])->Result<usize,()> {
+        if !self.writeable(){
+            return Err(());
+        }
         match &mut self.class {
-            DFileClass::Inode(inode) => {
+            DFileClass::ClassInode(inode) => {
                 if inode.is_file(){
                     inode.write_off(buf,self.pos).map(|x|{
                         self.pos+=x;
@@ -331,7 +283,7 @@ impl DFile {
                     panic!("can`t write dir");
                 }
             }
-            DFileClass::Terminal(t) => {
+            DFileClass::ClassTerminal(t) => {
                 Ok(t.write(buf))
             }
             _=>{
@@ -339,9 +291,45 @@ impl DFile {
             }
         }
     }
+    pub fn read_all(&mut self,buf:&mut [u8])->Result<usize,usize>{
+        let mut buf_pos = 0;
+        while buf_pos<buf.len() {
+            let real_read = match self.read(&mut buf[buf_pos..]) {
+                Ok(v) => {
+                    if v==0{
+                        return Err(buf_pos);
+                    }
+                    v
+                }
+                Err(_) => {
+                    return Err(buf_pos);
+                }
+            };
+            buf_pos+=real_read;
+        }
+        return Ok(buf_pos);
+    }
+    pub fn write_all(&mut self,buf:&[u8])->Result<usize,usize>{
+        let mut buf_pos = 0;
+        while buf_pos<buf.len() {
+            let real_write = match self.write(&buf[buf_pos..]) {
+                Ok(v) => {
+                    if v==0{
+                        return Err(buf_pos);
+                    }
+                    v
+                }
+                Err(_) => {
+                    return Err(buf_pos);
+                }
+            };
+            buf_pos+= real_write;
+        }
+        return Ok(buf_pos);
+    }
     pub fn seek(&mut self,pos:SeekFrom)->Result<usize,()>{
         match &self.class{
-            DFileClass::Inode(inode) => {
+            DFileClass::ClassInode(inode) => {
                 if inode.is_file(){
                     let max_pos = inode.get_dentry().len() as usize;
                     match pos{
@@ -390,9 +378,123 @@ impl DFile {
                     panic!("can`t seek dir");
                 }
             }
-            DFileClass::Terminal(_) => {
+            DFileClass::ClassTerminal(_) => {
                 Ok(0)
             }
         }
+    }
+}
+
+lazy_static!{
+    static ref root_dfile:Arc<DFile> = Arc::new(DFile {
+            inner: SpinLock::new(DFileMutInner {
+                class: DFileClass::ClassInode(Inode::get_root()),
+                pos: 0,
+                open_flags: OpenFlags::O_RDONLY
+            })
+        });
+}
+
+// Terminal类型不需要OpenFlags
+impl DFile {
+    pub fn new_stdin() -> Self {
+        Self {
+            inner: SpinLock::new(DFileMutInner {
+                class: DFileClass::ClassTerminal(Terminal {
+                    ttype: TerminalType::STDIN
+                }),
+                pos: 0,
+                open_flags: OpenFlags::O_RDONLY
+            })
+        }
+    }
+    pub fn new_stdout() -> Self {
+        Self {
+            inner: SpinLock::new(DFileMutInner {
+                class: DFileClass::ClassTerminal(Terminal {
+                    ttype: TerminalType::STDOUT
+                }),
+                pos: 0,
+                open_flags: OpenFlags::O_WRONLY
+            })
+        }
+    }
+    pub fn new_stderr() -> Self {
+        Self {
+            inner: SpinLock::new(DFileMutInner {
+                class: DFileClass::ClassTerminal(Terminal {
+                    ttype: TerminalType::STDERR
+                }),
+                pos: 0,
+                open_flags: OpenFlags::O_WRONLY
+            })
+        }
+    }
+    pub fn get_root() -> Arc<Self> {
+        root_dfile.clone()
+    }
+    pub fn from_inode(inode: Arc<Inode>, open_flags: OpenFlags) -> Self {
+        Self {
+            inner: SpinLock::new(DFileMutInner {
+                class: DFileClass::ClassInode(inode),
+                pos: 0,
+                open_flags
+            })
+        }
+    }
+    pub fn open_name(&self, name: &str, open_flags: OpenFlags) -> Option<Self> {
+        match &self.inner.lock_irq().unwrap().class {
+            DFileClass::ClassInode(inode) => {
+                inode.get_sub_node(name).map(|x| {
+                    Self {
+                        inner: SpinLock::new(
+                            DFileMutInner {
+                                class: DFileClass::ClassInode(inode.clone()),
+                                pos: 0,
+                                open_flags
+                            }
+                        )
+                    }
+                })
+            }
+            DFileClass::ClassTerminal(_) => {
+                None
+            }
+        }
+    }
+    pub fn open_path(&self, path: &str, open_flags: OpenFlags) -> Option<Self> {
+        match &self.inner.lock_irq().unwrap().class {
+            DFileClass::ClassInode(inode) => {
+                inode.get_node_by_path(path).map(|x| {
+                    Self {
+                        inner: SpinLock::new(
+                            DFileMutInner {
+                                class: DFileClass::ClassInode(inode.clone()),
+                                pos: 0,
+                                open_flags
+                            }
+                        )
+                    }
+                })
+            }
+            DFileClass::ClassTerminal(_) => {
+                None
+            }
+        }
+    }
+    pub fn read(&self,buf:&mut [u8])->Result<usize,()>{
+        self.inner.lock_irq().unwrap().read(buf)
+    }
+    pub fn write(&self,buf:&[u8])->Result<usize,()>{
+        self.inner.lock_irq().unwrap().write(buf)
+    }
+    pub fn read_all(&self,buf:&mut [u8])->Result<usize,usize>{
+        self.inner.lock_irq().unwrap().read_all(buf)
+    }
+    pub fn write_all(&self,buf:&[u8])->Result<usize,usize>{
+        self.inner.lock_irq().unwrap().write_all(buf)
+    }
+    pub fn seek(&self,pos:SeekFrom)->Result<usize,()> {
+        self.inner.lock_irq().unwrap().seek(pos)
     }
 }
