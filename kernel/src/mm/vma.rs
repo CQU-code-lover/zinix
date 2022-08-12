@@ -17,6 +17,7 @@ use crate::mm::page::Page;
 use crate::mm::pagetable::{PageTable, PTEFlags};
 use crate::pre::{ReadWriteOffUnsafe, ReadWriteSingleNoOff, ReadWriteSingleOff};
 use crate::{println, SpinLock};
+use crate::fs::inode::Inode;
 
 bitflags! {
     pub struct VMAFlags: u8 {
@@ -247,4 +248,10 @@ impl ReadWriteOffUnsafe<u8> for VMA {
         }
         buf_size
     }
+}
+
+pub struct VmaInode{
+    inode:Arc<Inode>,
+    off:usize,
+
 }

@@ -5,6 +5,7 @@ use core::cmp::{max, min};
 use fatfs::{DefaultTimeProvider, FileSystem, FsOptions, IntoStorage, IoBase, LossyOemCpConverter, SeekFrom};
 use crate::{debug_sync, SpinLock, trace_sync};
 use crate::debug;
+use crate::fs::{FatDev, FatFs};
 use crate::io::{ BlockReadWrite};
 use crate::io::sdcard::SDCardDev;
 use crate::io::virtio::VirtioDev;
@@ -146,4 +147,8 @@ impl<T:BlockReadWrite> fatfs::Seek for BlkStorage<T> {
         }
         Ok(self.pos)
     }
+}
+
+pub fn new_fat_fs()->FatFs{
+    fatfs::FileSystem::new(FatDev::new(),FsOptions::new()).unwrap()
 }

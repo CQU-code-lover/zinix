@@ -6,7 +6,7 @@ use core::mem::size_of;
 use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use fatfs::error;
 use crate::{error_sync, println, trace_sync};
-use crate::fs::dfile::DFile;
+use crate::fs::dfile::OldDFile;
 use crate::sbi::shutdown;
 use crate::syscall::sys_fs::syscall_fs_entry;
 use crate::task::exit_self;

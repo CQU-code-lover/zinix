@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Add;
 use crate::error_sync;
-use crate::fs::dfile::DirEntryWrapper;
+use crate::fs::dfile::{DFile, DirEntryWrapper};
 use crate::fs::fat::get_fatfs;
 use crate::fs::fcntl::{AT_FDCWD, OpenFlags, OpenMode};
 use crate::fs::{get_dentry_from_dir};
@@ -41,12 +41,17 @@ pub fn syscall_fs_entry(tf:&mut TrapFrame, syscall_id:usize){
 }
 
 fn sys_openat(dirfd:isize,filename:String,flags:OpenFlags,mode:OpenMode)->isize{
-    let fs = get_fatfs();
-    let fs_lock = fs.lock_irq().unwrap();
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
     let pwd_dir = if dirfd==AT_FDCWD{
-        get_dentry_from_dir(fs_lock.root_dir(), tsk.pwd_ref()).unwrap().to_dir()
+        match tsk.pwd_dfile.as_ref().unwrap().open_path(&filename){
+            None => {
+                return -1;
+            }
+            Some(v) => {
+
+            }
+        }
     } else {
         fs_lock.root_dir()
     };
@@ -62,7 +67,7 @@ fn sys_openat(dirfd:isize,filename:String,flags:OpenFlags,mode:OpenMode)->isize{
             let mut s = String::from(tsk.pwd_ref());
             s.push('/');
             let ss = s+&filename;
-            match tsk.alloc_opend(Arc::new(DFile::new_file(ss))) {
+            match tsk.alloc_opend(Arc::new(OldDFile::new_file(ss))) {
                 None => {
                     return -1;
                 }
@@ -98,5 +103,5 @@ fn sys_sendfile(out_fd:isize,in_fd:isize,offset:*const usize,count:usize)->isize
         }
     };
     let mut buf = [0u8;SENDFILE_BUF_LEN];
-
+    -1
 }

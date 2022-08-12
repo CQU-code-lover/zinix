@@ -315,7 +315,7 @@ impl Page {
                         Err(())
                     }
                     Some(s) => {
-                        if s>max_pos || s<0 {
+                        if s>max_pos{
                             Err(())
                         } else {
                             inner.pos = s;

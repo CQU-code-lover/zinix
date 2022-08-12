@@ -21,10 +21,11 @@ use crate::task::stack::Stack;
 use riscv::register::*;
 use crate::mm::aux::*;
 use xmas_elf::symbol_table::Visibility::Default;
-use crate::fs::dfile::{DFile, get_stderr, get_stdin, get_stdout};
+use crate::fs::dfile::{OldDFile, get_stderr, get_stdin, get_stdout, DFile};
 use crate::fs::dfile::DFILE_TYPE::DFTYPE_STDIN;
 use crate::fs::fat::get_fatfs;
 use crate::fs::get_dentry_from_dir;
+use crate::fs::inode::{ Inode};
 use crate::mm::{alloc_pages, get_kernel_pagetable};
 use crate::mm::addr::{Addr, Vaddr};
 use crate::mm::page::Page;
@@ -142,16 +143,9 @@ pub struct Task {
     status: TaskStatus,
     pub mm: Option<MmStruct>,
     opened: Vec<Option<Arc<DFile>>>,
-    pwd:String
+    pwd:String,
+    pub pwd_dfile:Option<DFile>,
 }
-
-// impl Add<usize> for Addr {
-//     type Output = usize;
-//
-//     fn add(self, rhs: usize) -> Self::Output {
-//         rhs
-//     }
-// }
 
 fn get_init_pwd()->String {
     String::from("/")
@@ -182,7 +176,8 @@ impl Task {
             status: TaskStatus::TaskRunning,
             mm: None,
             opened: vec![None;MAX_OPENED],
-            pwd:get_init_pwd()
+            pwd:get_init_pwd(),
+            pwd_dfile:None
         };
         sscratch::write(0);
         unsafe {
@@ -208,7 +203,7 @@ impl Task {
             None
         }
     }
-    pub fn set_opend(&mut self,fd:usize,file:Option<Arc<DFile>>)->Result<Option<Arc<DFile>>,isize>{
+    pub fn set_opend(&mut self, fd:usize, file:Option<Arc<DFile>>) ->Result<Option<Arc<DFile>>,isize>{
         if fd < self.opened.len() {
             let ret = self.opened[fd].as_ref().map(|x|{
                 x.clone()
@@ -219,7 +214,7 @@ impl Task {
             Err(-1)
         }
     }
-    pub fn alloc_opend(&mut self,file:Arc<DFile>)->Option<usize>{
+    pub fn alloc_opend(&mut self, file:Arc<DFile>) ->Option<usize>{
         for i in 0..self.opened.len(){
             match self.opened[i].as_ref(){
                 None => {
@@ -231,6 +226,19 @@ impl Task {
             }
         }
         None
+    }
+    fn _update_pwd_dfile_from_pwd(&mut self)->Result<(),()>{
+        let s = Inode::get_root().get_node_by_path(&self.pwd);
+        match s {
+            None => {
+                self.pwd_dfile = None;
+                Err(())
+            }
+            Some(n) => {
+                self.pwd_dfile = Some(DFile::from_inode(n));
+                Ok(())
+            }
+        }
     }
     pub fn is_kern(&self)->bool {
         match self.mm {
@@ -252,11 +260,9 @@ impl Task {
             status: TaskStatus::TaskRunning,
             mm: None,
             opened:vec![None;MAX_OPENED],
-            pwd:get_init_pwd()
+            pwd:get_init_pwd(),
+            pwd_dfile: None
         };
-        tsk.opened[0] = Some(get_stdin());
-        tsk.opened[1] = Some(get_stdout());
-        tsk.opened[2] = Some(get_stderr());
         tsk.context.ra = kern_trap_ret as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
         tsk.context.sstatus = r_sstatus()|SSTATUS_SPP|SSTATUS_SPIE|SSTATUS_SIE;
@@ -323,11 +329,12 @@ impl Task {
             status: TaskStatus::TaskRunning,
             mm: Some(mm_struct),
             opened:vec![None;MAX_OPENED],
-            pwd:get_init_pwd()
+            pwd:get_init_pwd(),
+            pwd_dfile: Some(DFile::open_root())
         };
-        tsk.opened[0] = Some(get_stdin());
-        tsk.opened[1] = Some(get_stdout());
-        tsk.opened[2] = Some(get_stderr());
+        tsk.opened[0] = Some(Arc::new(DFile::new_stdin()));
+        tsk.opened[1] = Some(Arc::new(DFile::new_stdout()));
+        tsk.opened[2] = Some(Arc::new(DFile::new_stderr()));
         tsk.context.ra = user_trap_ret as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
         tsk.context.sstatus = r_sstatus()|SSTATUS_SPIE|SSTATUS_SIE&(!SSTATUS_SPP);

@@ -1,12 +1,13 @@
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
-use fatfs::{Date, DateTime, DefaultTimeProvider, Dir, DirEntry, File, LossyOemCpConverter, Time};
+use fatfs::{Date, DateTime, DefaultTimeProvider, Dir, DirEntry, File, FileSystem, LossyOemCpConverter, Time};
 use crate::fs::dfile::DirEntryWrapper;
 use crate::fs::fat::{BlkStorage, fat_init, get_fatfs};
 use crate::io::virtio::VirtioDev;
 use crate::{info_sync, println};
 use crate::io::sdcard::SDCardDev;
+use crate::fs::fat::new_fat_fs;
 
 pub mod fat;
 pub mod inode;
@@ -18,14 +19,34 @@ pub fn init_fs(){
     fat_init();
 }
 
+lazy_static!{
+    static ref UNSAFE_FAT_FS:UnsafeFatfs = UnsafeFatfs(new_fat_fs());
+}
+
+struct UnsafeFatfs(FatFs);
+
+unsafe impl Sync for UnsafeFatfs {}
+
 #[cfg(feature = "qemu")]
-pub type DirAlias<'a> = Dir<'a,BlkStorage<VirtioDev>, DefaultTimeProvider, LossyOemCpConverter>;
+pub type FatDev = VirtioDev;
 #[cfg(feature = "k210")]
-pub type DirAlias<'a> = Dir<'a,BlkStorage<SDCardDev>, DefaultTimeProvider, LossyOemCpConverter>;
-#[cfg(feature = "qemu")]
-pub type FileAlias<'a> = File<'a,BlkStorage<VirtioDev>, DefaultTimeProvider, LossyOemCpConverter>;
-#[cfg(feature = "k210")]
-pub type FileAlias<'a> = File<'a,BlkStorage<SDCardDev>, DefaultTimeProvider, LossyOemCpConverter>;
+pub type FATDev = SDCardDev;
+
+pub type FatFs = FileSystem<BlkStorage<FatDev>,DefaultTimeProvider,LossyOemCpConverter>;
+
+pub type DirAlias<'a> = Dir<'a,BlkStorage<FatDev>, DefaultTimeProvider, LossyOemCpConverter>;
+pub type FileAlias<'a> = File<'a,BlkStorage<FatDev>, DefaultTimeProvider, LossyOemCpConverter>;
+pub type DirEntryAlias<'a> = DirEntry<'a,BlkStorage<FatDev>,DefaultTimeProvider,LossyOemCpConverter>;
+
+pub fn get_sub_dentry<'a,'b>(in_dir:&DirAlias<'a>,name:&'b str)->Option<DirEntryAlias<'a>>{
+    for item in in_dir.iter(){
+        let dentry = item.unwrap();
+        if dentry.file_name().eq(name) {
+            return Some(dentry);
+        }
+    }
+    None
+}
 
 pub fn get_dentry_from_dir<'a,'b>(in_dir:DirAlias<'a>,path:&'b str)->Option<DirEntryWrapper<'a>>{
     let name_array_pre:Vec<&str> = path.split("/").collect();
@@ -34,7 +55,7 @@ pub fn get_dentry_from_dir<'a,'b>(in_dir:DirAlias<'a>,path:&'b str)->Option<DirE
             if (*x).is_empty(){ false } else { true }
         }
     ).collect();
-    println!("{:?}",name_array);
+    // println!("{:?}",name_array);
     let mut wrapper = DirEntryWrapper::default();
     if name_array.is_empty() {
         wrapper.dir = Some(in_dir);
@@ -93,4 +114,8 @@ pub fn get_dentry_from_dir<'a,'b>(in_dir:DirAlias<'a>,path:&'b str)->Option<DirE
         }
     }
     Some(wrapper)
+}
+
+pub unsafe fn get_unsafe_global_fatfs() ->&'static FatFs{
+    return &UNSAFE_FAT_FS.0
 }
