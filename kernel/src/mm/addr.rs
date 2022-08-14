@@ -1,5 +1,5 @@
 use core::fmt;
-use core::fmt::{Debug, Formatter};
+use core::fmt::{Debug, Formatter, UpperHex};
 use core::iter::Step;
 use core::mem::size_of;
 use core::ops::{Add, AddAssign, Deref, DerefMut, Div, DivAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign};
@@ -51,6 +51,13 @@ pub trait Addr<T>: InnerAccess<T> + OperatorSet<usize> + DerefMut + Deref + Page
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Default)]
 pub struct Paddr(pub usize);
+
+impl UpperHex for Paddr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f,"{:#X}",self.0);
+        Ok(())
+    }
+}
 
 impl From<usize> for Paddr {
     fn from(val: usize) -> Self {
@@ -241,6 +248,13 @@ impl Paddr {
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Default)]
 pub struct Vaddr(pub usize);
+
+impl UpperHex for Vaddr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f,"{:#X}",self.0);
+        Ok(())
+    }
+}
 
 impl InnerAccess<usize> for Vaddr {
     fn get_inner(&self) -> usize {

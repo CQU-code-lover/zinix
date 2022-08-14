@@ -18,11 +18,11 @@ use crate::sbi::shutdown;
 
 pub unsafe fn do_test(){
     // mm_test();
-    // Task::create_user_task_and_run("1.o",vec![]);
+    Task::create_user_task_and_run("m.o",vec![]);
     // virtio_test();
     // shutdown();
     // Task::create_user_task_and_run("entry-static.exe",vec!["statvfs".to_string()]);
     // shutdown();
     // Task::create_user_task_and_run("busybox_unstripped",vec!["yes".to_string()]);
-    Task::create_user_task_and_run("busybox_unstripped",vec!["busybox".to_string(),"cat".to_string(),"1.o".to_string()]);
+    // Task::create_user_task_and_run("busybox_unstripped",vec!["busybox".to_string(),"cat".to_string(),"2.txt".to_string()]);
 }

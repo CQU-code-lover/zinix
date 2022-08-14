@@ -47,11 +47,35 @@ pub fn syscall_fs_entry(tf:&mut TrapFrame, syscall_id:usize){
         SYSCALL_READ=>{
             sys_read(tf.arg0() as isize,tf.arg1(),tf.arg2())
         }
+        SYSCALL_CLOSE=>{
+            sys_close(tf.arg0() as isize)
+        }
         _ => {
             panic!("fs syscall {} not impl",syscall_id);
         }
     };
     tf.ret(ret as usize);
+}
+
+// 未打开的fd是none 此时会错误返回
+fn sys_close(fd:isize)->isize{
+    let mut running = get_running();
+    let mut tsk = running.lock_irq().unwrap();
+    return match tsk.clear_opened(fd as usize) {
+        Ok(v) => {
+            match v {
+                None => {
+                    -1
+                }
+                Some(_) => {
+                    0
+                }
+            }
+        }
+        Err(e) => {
+            -1
+        }
+    }
 }
 
 fn do_dup(old_fd:isize,new_fd:Option<isize>,open_flags_bits:Option<usize>)->isize{
@@ -64,7 +88,7 @@ fn do_dup(old_fd:isize,new_fd:Option<isize>,open_flags_bits:Option<usize>)->isiz
         Some(f) => {
             match new_fd {
                 None => {
-                    match tsk.alloc_opend(f) {
+                    match tsk.alloc_opened(f) {
                         None => {
                             return -1;
                         }
@@ -77,7 +101,7 @@ fn do_dup(old_fd:isize,new_fd:Option<isize>,open_flags_bits:Option<usize>)->isiz
                     if open_flags_bits.is_some() {
                         // dup3 todo
                     }
-                    match tsk.set_opend(newfd as usize,Some(f)){
+                    match tsk.set_opened(newfd as usize, Some(f)){
                         Ok(_) => {
                             return newfd;
                         }
@@ -92,10 +116,11 @@ fn do_dup(old_fd:isize,new_fd:Option<isize>,open_flags_bits:Option<usize>)->isiz
 }
 
 fn sys_openat(dirfd:isize,filename:String,flags:OpenFlags,mode:OpenMode)->isize{
+    trace_sync!("openat: dirfd{} filename {}",dirfd,&filename);
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
     let dir_dfile = if dirfd==AT_FDCWD {
-        tsk.get_pwd_opend()
+        tsk.get_pwd_opened()
     } else {
         match tsk.get_opened(dirfd as usize){
             None => {
@@ -106,14 +131,17 @@ fn sys_openat(dirfd:isize,filename:String,flags:OpenFlags,mode:OpenMode)->isize{
     };
     match dir_dfile.open_path(&filename,flags){
         None => {
+            trace_sync!("openat: opened fail");
             return -1;
         }
         Some(new_file) => {
-            match tsk.alloc_opend(Arc::new(new_file)){
+            match tsk.alloc_opened(Arc::new(new_file)){
                 None => {
+                    trace_sync!("openat: opened fail");
                     return -1;
                 }
                 Some(v) => {
+                    trace_sync!("openat: opened fd {}",v);
                     return v as isize;
                 }
             }

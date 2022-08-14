@@ -204,7 +204,7 @@ impl Task {
             None
         }
     }
-    pub fn set_opend(&mut self, fd:usize, file:Option<Arc<DFile>>)->Result<Option<Arc<DFile>>,()>{
+    pub fn set_opened(&mut self, fd:usize, file:Option<Arc<DFile>>)->Result<Option<Arc<DFile>>,()>{
         if fd < self.opened.len() {
             let ret = self.opened[fd].as_ref().map(|x|{
                 x.clone()
@@ -215,7 +215,10 @@ impl Task {
             Err(())
         }
     }
-    pub fn alloc_opend(&mut self, file:Arc<DFile>) ->Option<usize>{
+    pub fn clear_opened(&mut self, fd:usize)->Result<Option<Arc<DFile>>,()>{
+        self.set_opened(fd,None)
+    }
+    pub fn alloc_opened(&mut self, file:Arc<DFile>) ->Option<usize>{
         for i in 0..self.opened.len(){
             match self.opened[i].as_ref(){
                 None => {
@@ -228,7 +231,7 @@ impl Task {
         }
         None
     }
-    pub fn get_pwd_opend(&mut self)->Arc<DFile>{
+    pub fn get_pwd_opened(&mut self) ->Arc<DFile>{
         self.pwd_dfile.clone()
     }
     pub fn is_kern(&self)->bool {

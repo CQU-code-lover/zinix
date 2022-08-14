@@ -2,7 +2,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::cmp::min;
 use fatfs::{Date, DateTime, DefaultTimeProvider, Dir, File, FileAttributes, LossyOemCpConverter, Read, SeekFrom, Time, Write};
-use crate::{println, SpinLock};
+use crate::{print, println, SpinLock};
 use crate::fs::dfile::DFILE_TYPE::*;
 use crate::fs::{DirAlias, FileAlias, get_dentry_from_dir};
 use crate::fs::fat::{BlkStorage, get_fatfs};
@@ -120,7 +120,7 @@ impl OldDFMutInner {
         match self.dftype {
             DFILE_TYPE::DFTYPE_STDIN => {0}
             DFILE_TYPE::DFTYPE_STDOUT => {
-                println!("{}",String::from_utf8_lossy(buf));
+                print!("{}",String::from_utf8_lossy(buf));
                 buf.len()
             }
             DFILE_TYPE::DFTYPE_FILE => {
@@ -208,7 +208,7 @@ impl Terminal {
                 let mut i = 0;
                 while i<buf_len{
                     let real_write = min(TERMINAL_INTER_BUF_LEN,buf_len-i);
-                    println!("{}",String::from_utf8_lossy(&buf[i..(i+real_write)]));
+                    print!("{}",String::from_utf8_lossy(&buf[i..(i+real_write)]));
                     i+=real_write;
                 }
                 buf_len
@@ -469,7 +469,7 @@ impl DFile {
                     Self {
                         inner: SpinLock::new(
                             DFileMutInner {
-                                class: DFileClass::ClassInode(inode.clone()),
+                                class: DFileClass::ClassInode(x.clone()),
                                 pos: 0,
                                 open_flags
                             }

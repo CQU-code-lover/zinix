@@ -92,3 +92,12 @@ impl Write for FakeWriteSource {
         Ok(())
     }
 }
+
+pub trait ShowRdWrEx{
+    fn readable(&self)->bool;
+    fn writeable(&self)->bool;
+    fn execable(&self)->bool;
+    fn readwriteable(&self)->bool{
+        self.readable()&&self.writeable()
+    }
+}

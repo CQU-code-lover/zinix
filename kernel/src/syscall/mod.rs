@@ -104,7 +104,7 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
             trap_frame.ret(0);
         }
         SYSCALL_OPENAT|SYSCALL_SENDFILE|SYSCALL_WRITEV|SYSCALL_WRITE|SYSCALL_READ|
-        SYSCALL_DUP|SYSCALL_DUP3 => {
+        SYSCALL_DUP|SYSCALL_DUP3|SYSCALL_CLOSE => {
             syscall_fs_entry(trap_frame,syscall_id);
         }
         _ => {
