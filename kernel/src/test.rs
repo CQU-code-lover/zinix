@@ -1,10 +1,11 @@
 use alloc::string::{String, ToString};
 use alloc::vec;
+use core::ptr::slice_from_raw_parts;
 use fatfs::{FsOptions, IntoStorage, Read, Seek, SeekFrom, Write};
 use riscv::register::sstatus::Sstatus;
 use xmas_elf::ElfFile;
 use crate::io::virtio::{virtio_test, VirtioDev};
-use crate::mm::addr::OldAddr;
+use crate::mm::addr::{OldAddr, PageAlign, Vaddr};
 use crate::mm::{alloc_pages, get_kernel_pagetable, mm_test};
 use crate::{info_sync, println, Task};
 use crate::asm::{enable_irq, r_sstatus, SSTATUS_SIE};
@@ -13,11 +14,25 @@ use crate::fs::fat::get_fatfs;
 use crate::fs::inode::Inode;
 use crate::io::BlockRead;
 use crate::io::sdcard::{new_sdcard, SDCardDev};
+use crate::mm::kmap::KmapToken;
 use crate::mm::mm::MmStruct;
+use crate::pre::InnerAccess;
 use crate::sbi::shutdown;
+
+unsafe fn test_kmap(){
+    let node = Inode::get_root().get_sub_node("2.txt").unwrap();
+    let file_len = node.get_dentry().len() as usize;
+    let token = KmapToken::new_file(Vaddr(file_len).ceil().0,node,0,file_len-40).unwrap();
+    let vaddr = token.get_vaddr();
+    let v = vaddr.get_inner() as *const u8;
+    let buf = slice_from_raw_parts(v,file_len);
+    println!("{}",String::from_utf8_lossy(&*buf));
+    shutdown()
+}
 
 pub unsafe fn do_test(){
     // mm_test();
+    // test_kmap();
     Task::create_user_task_and_run("m.o",vec![]);
     // virtio_test();
     // shutdown();

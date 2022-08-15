@@ -25,12 +25,6 @@ extern "C" {
     fn boot_pagetable();
 }
 
-bitflags! {
-    pub struct PgProt{
-
-    }
-}
-
 pub struct PageTable{
     // private pages for pagetable..
     // this pages can`t share with other address space..

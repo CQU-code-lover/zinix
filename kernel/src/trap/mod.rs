@@ -10,8 +10,10 @@ use riscv::register::stvec::TrapMode;
 use crate::{debug_sync, println};
 use crate::asm::{disable_irq, enable_irq, r_scause, r_stval};
 use crate::consts::PHY_MEM_OFFSET;
-use crate::mm::get_kernel_pagetable;
+use crate::mm::{get_kernel_mm, get_kernel_pagetable};
+use crate::mm::addr::{PageAlign, Vaddr};
 use crate::mm::pagetable::PTEFlags;
+use crate::mm::vma::VMA;
 use crate::sbi::shutdown;
 use crate::syscall::syscall_entry;
 use crate::task::task::{get_running, RUNNING_TASK};
@@ -217,25 +219,43 @@ fn exc_handler(trap_frame:&mut TrapFrame){
                         trap_frame.sepc+=4;
                     }
                     Exception::InstructionPageFault => {
+                        let vaddr = r_stval();
+                        trap_page_fault_handler(Vaddr(vaddr));
+                        // unsafe {
+                        //     // get_running().lock().unwrap().install_pagetable();
+                        //     let v = *(trap_frame.sepc as *const usize);
+                        //     println!("ins = {:#X}", v);
+                        // }
+                        return;
                         let mut pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
                         println!("{:#b}", pte.flags);
                         // pte.flags|=PTEFlags::A.bits();
                         // set_usize_by_addr(pte.get_point_paddr()+PHY_MEM_OFFSET,pte.into());
-                        unsafe {
-                            // get_running().lock().unwrap().install_pagetable();
-                            let v = *(trap_frame.sepc as *const usize);
-                            // println!("ins = {:#X}", v);
-                        }
+
                         pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
                         println!("{:#b}", pte.flags);
                     }
                     Exception::LoadPageFault => {
                         let vaddr = r_stval();
-                        let pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte();
-                        println!("{:#b}", pte.flags);
-                        panic!("load pg fault");
+                        trap_page_fault_handler(Vaddr(vaddr));
+                        return;
+                        let running = get_running();
+                        let tsk = running.lock_irq().unwrap();
+                        if tsk.is_kern(){
+                            let mut mm = get_kernel_mm();
+                            let va = Vaddr(r_stval()).floor();
+                            let vma = mm.find_vma(va).unwrap();
+                            vma._do_alloc_one_page(va);
+                        } else {
+                            panic!("load pg fault");
+                        }
+                        // let pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte();
+                        // println!("{:#b}", pte.flags);
                     }
                     Exception::StorePageFault => {
+                        let vaddr = r_stval();
+                        trap_page_fault_handler(Vaddr(vaddr));
+                        return;
                         // let vaddr = r_stval();
                         // let pte  = if get_running().lock_irq().unwrap().mm.is_some() {
                         //      get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte()
@@ -263,5 +283,42 @@ pub fn trap_init(){
         sstatus::set_sie();
         // timer is enable, but not set next tic
         sie::set_stimer();
+    }
+}
+
+fn trap_page_fault_handler(vaddr:Vaddr) ->bool{
+    let v = vaddr.floor();
+    let running = get_running();
+    let mut tsk = running.lock_irq().unwrap();
+    if tsk.is_kern(){
+        match get_kernel_mm().find_vma(v){
+            None => {
+                panic!("error address access!");
+            }
+            Some(vma) => {
+                if vma._find_page(v).is_some(){
+                    // 已经映射过 说明存在权限访问问题
+                    panic!("error address prot!");
+                }
+                vma._do_alloc_one_page(v).unwrap();
+                return true;
+            }
+        }
+    } else {
+        let mut m = tsk.mm.as_mut().unwrap();
+        match m.find_vma(v){
+            None => {
+                panic!("error address access!");
+            }
+            Some(vma) => {
+                if vma._find_page(v).is_some(){
+                    // 已经映射过 说明存在权限访问问题
+                    panic!("error address prot!");
+                }
+                vma._do_alloc_one_page(v).unwrap();
+                debug_sync!("pgf alloc vaddr:{:#X}",v);
+                return true;
+            }
+        }
     }
 }

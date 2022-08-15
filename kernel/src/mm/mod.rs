@@ -33,6 +33,7 @@ pub(crate) mod pagetable;
 pub(crate) mod vma;
 pub(crate) mod mm;
 pub(crate) mod aux;
+pub(crate) mod kmap;
 
 const k210_mem_mb:u32 = 6;
 const qemu_mem_mb:u32 = 128;

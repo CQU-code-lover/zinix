@@ -8,14 +8,14 @@ use core::hash::Hash;
 use core::mem;
 use core::mem::size_of;
 use core::ops::{Add, Index};
-use core::ptr::slice_from_raw_parts_mut;
+use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use fatfs::Read;
 use log::error;
 use crate::asm::{disable_irq, enable_irq, r_sp, r_sstatus, r_tp, SSTATUS_SIE, SSTATUS_SPIE, SSTATUS_SPP};
 use crate::consts::{BOOT_STACK_NR_PAGES, MAX_ORDER, PAGE_SIZE, STACK_MAGIC, USER_STACK_MAX_ADDR};
 use crate::mm::mm::MmStruct;
 use crate::mm::pagetable::PageTable;
-use crate::{error_sync, println, SpinLock, trace_sync};
+use crate::{error_sync, info_sync, println, SpinLock, trace_sync};
 use crate::task::{add_task, generate_tid};
 use crate::task::stack::Stack;
 use riscv::register::*;
@@ -28,7 +28,8 @@ use crate::fs::fcntl::OpenFlags;
 use crate::fs::get_dentry_from_dir;
 use crate::fs::inode::{ Inode};
 use crate::mm::{alloc_pages, get_kernel_pagetable};
-use crate::mm::addr::{Addr, Vaddr};
+use crate::mm::addr::{Addr, PageAlign, Vaddr};
+use crate::mm::kmap::KmapToken;
 use crate::mm::page::Page;
 use crate::pre::InnerAccess;
 use crate::utils::{order2pages, pages2order};
@@ -280,43 +281,57 @@ impl Task {
             }
         };
         let file_len = node.get_dentry().len() as usize;
-        let f = DFile::from_inode(node,OpenFlags::O_RDONLY);
-        let mut pages_tracer:Vec<Arc<Page>> = Vec::new();
-        let max_order_size = PAGE_SIZE*order2pages(MAX_ORDER-1);
-        let read_buf = if file_len>max_order_size {
-            let mut block_cnt  = file_len/max_order_size;
-            if file_len%max_order_size!=0{
-                block_cnt+=1;
-            }
-            for _ in 0..block_cnt {
-                pages_tracer.push(alloc_pages(MAX_ORDER-1).unwrap());
-            }
-            let mut pre:Option<Arc<Page>> = None;
-            for i in pages_tracer.iter().rev(){
-                if pre.is_some() {
-                    assert_eq!(pre.as_ref().unwrap().get_vaddr() + max_order_size, i.get_vaddr());
-                }
-                pre = Some(i.clone());
-            }
-            let ptr = pages_tracer[pages_tracer.len()-1].get_vaddr().get_inner() as * mut u8;
-            slice_from_raw_parts_mut(ptr,order2pages(MAX_ORDER-1)*PAGE_SIZE*pages_tracer.len())
-        } else {
-            let order = (file_len/PAGE_SIZE)+1;
-            pages_tracer.push(alloc_pages(order).unwrap());
-            let ptr = pages_tracer[0].get_vaddr().get_inner() as *mut u8;
-            slice_from_raw_parts_mut(ptr,order2pages(order)*PAGE_SIZE)
-        };
-
-        let mut cnt: usize = 0;
-        loop {
-            let read = f.read(&mut (*read_buf)[cnt..]).unwrap();
-            cnt += read;
-            if read == 0 {
-                break;
-            }
-        }
-        println!("{}",cnt);
-        let (mm_struct, mut auxv, entry_point) = MmStruct::new_from_elf(&(*read_buf)[..cnt]);
+        let kmap_len = Vaddr(file_len).ceil().get_inner();
+        let kmap_token = KmapToken::new_file(kmap_len,
+                                             node.clone(),0, file_len).unwrap();
+        let read_buf = kmap_token.get_buf();
+        let cnt = kmap_token.get_len();
+        // let node = match Inode::get_root().get_node_by_path(path) {
+        //     Some(node)=> {
+        //         nod
+        //     }
+        //     None=> {
+        //         return None;
+        //     }
+        // };
+        // let file_len = node.get_dentry().len() as usize;
+        // let f = DFile::from_inode(node,OpenFlags::O_RDONLY);
+        // let mut pages_tracer:Vec<Arc<Page>> = Vec::new();
+        // let max_order_size = PAGE_SIZE*order2pages(MAX_ORDER-1);
+        // let read_buf = if file_len>max_order_size {
+        //     let mut block_cnt  = file_len/max_order_size;
+        //     if file_len%max_order_size!=0{
+        //         block_cnt+=1;
+        //     }
+        //     for _ in 0..block_cnt {
+        //         pages_tracer.push(alloc_pages(MAX_ORDER-1).unwrap());
+        //     }
+        //     let mut pre:Option<Arc<Page>> = None;
+        //     for i in pages_tracer.iter().rev(){
+        //         if pre.is_some() {
+        //             assert_eq!(pre.as_ref().unwrap().get_vaddr() + max_order_size, i.get_vaddr());
+        //         }
+        //         pre = Some(i.clone());
+        //     }
+        //     let ptr = pages_tracer[pages_tracer.len()-1].get_vaddr().get_inner() as * mut u8;
+        //     slice_from_raw_parts_mut(ptr,order2pages(MAX_ORDER-1)*PAGE_SIZE*pages_tracer.len())
+        // } else {
+        //     let order = (file_len/PAGE_SIZE)+1;
+        //     pages_tracer.push(alloc_pages(order).unwrap());
+        //     let ptr = pages_tracer[0].get_vaddr().get_inner() as *mut u8;
+        //     slice_from_raw_parts_mut(ptr,order2pages(order)*PAGE_SIZE)
+        // };
+        //
+        // let mut cnt: usize = 0;
+        // loop {
+        //     let read = f.read(&mut (*read_buf)[cnt..]).unwrap();
+        //     cnt += read;
+        //     if read == 0 {
+        //         break;
+        //     }
+        // }
+        // println!("{}",cnt);
+        let (mm_struct, mut auxv, entry_point) = MmStruct::new_from_elf(&(*read_buf)[..cnt],node.clone());
 
         trace_sync!("New User Task: entry point={:#X}",entry_point);
         let mut tsk = Task {
@@ -475,7 +490,7 @@ impl Task {
         //     };
         // println!("{:#X}",v);
         // shutdown();
-        trace_sync!("add user task OK");
+        info_sync!("add user task OK");
         Some(Arc::new(SpinLock::new(tsk)))
     }
     pub unsafe fn create_user_task_and_run(path:&str,args:Vec<String>)->Result<(),()>{

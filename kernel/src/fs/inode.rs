@@ -207,6 +207,29 @@ impl Inode {
             }
         }
     }
+    pub fn read_off_exact(&self,buf: &mut [u8],off:usize)->Result<usize,()>{
+        let need_len = buf.len();
+        let mut buf_pos:usize = 0;
+        while buf_pos<need_len {
+            match self.read_off(&mut buf[buf_pos..],off+buf_pos) {
+                Ok(len) => {
+                    if len==0{
+                        //无法继续读
+                        return Ok(buf_pos);
+                    }
+                    buf_pos+=len;
+                }
+                Err(_) => {
+                    return Err(());
+                }
+            }
+        }
+        Ok(need_len)
+    }
+    pub fn write_off_exact(&self,buf: &[u8],off:usize)->Result<usize,()>{
+        Err(())
+    }
+
     pub fn get_self(&self)->Arc<Self>{
         self.this.upgrade().unwrap()
     }

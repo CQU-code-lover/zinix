@@ -13,6 +13,6 @@ pub fn syscall_proc_entry(tf:&mut TrapFrame, syscall_id:usize) {
     tf.ret(ret as usize);
 }
 
-fn sys_brk()->isize{
-
-}
+// fn sys_brk()->isize{
+//
+// }
