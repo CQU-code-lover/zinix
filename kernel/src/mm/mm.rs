@@ -8,7 +8,7 @@ use core::ops::Bound::{Excluded, Included};
 use xmas_elf::ElfFile;
 use xmas_elf::program::Type::Load;
 
-use crate::consts::{MMAP_TOP, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, TMMAP_END, TMMAP_START, USER_HEAP_SIZE_NR_PAGES, USER_SPACE_END, USER_SPACE_START, USER_STACK_MAX_ADDR, USER_STACK_SIZE_NR_PAGES};
+use crate::consts::{MMAP_TOP, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, TMMAP_END, TMMAP_START, USER_HEAP_VMA_INIT_NR_PAGES, USER_SPACE_END, USER_SPACE_START, USER_STACK_MAX_ADDR, USER_STACK_SIZE_NR_PAGES};
 use crate::fs::inode::Inode;
 use crate::mm::addr::{Addr, PageAlign, PFN, Vaddr};
 use crate::mm::{alloc_one_page, alloc_pages, get_kernel_pagetable};
@@ -66,6 +66,45 @@ impl MmStruct {
             vmas: Default::default(),
             start_brk: Default::default(),
             brk: Default::default()
+        }
+    }
+    pub fn get_brk(&self)->Vaddr{
+        self.brk
+    }
+    pub fn get_start_brk(&self)->Vaddr{
+        self.start_brk
+    }
+    pub fn set_brk(&mut self,new:Vaddr)->Vaddr{
+        let ret = self.brk;
+        self.brk = new;
+        ret
+    }
+    pub fn _expand_brk(&mut self,new_brk:Vaddr)->Result<(),()> {
+        let m = self.vmas.range(self.start_brk..Vaddr(MMAP_TOP)).skip(1).next();
+        match m {
+            None => {
+                if new_brk>Vaddr(MMAP_TOP) {
+                    return Err(());
+                }
+            }
+            Some((start_vaddr,_)) => {
+                if *start_vaddr<new_brk{
+                    return Err(());
+                }
+            }
+        }
+        self.find_vma(self.start_brk).unwrap().__set_end_vaddr(new_brk);
+        self.set_brk(new_brk);
+        Ok(())
+    }
+    pub fn _shrink_brk(&mut self,new_brk:Vaddr)->Result<(),()>{
+        match self.find_vma(self.start_brk).unwrap().split(new_brk){
+            None => {
+                Err(())
+            }
+            Some(_) => {
+                Ok(())
+            }
         }
     }
     // 这个函数调试使用，未分配物理页的地址会panic
@@ -481,8 +520,27 @@ impl MmStruct {
                 load_end = max(load_end,vma_end);
             }
         }
+
         // heap
-        // let heap_start = load_end.ceil()+ PAGE_SIZE;
+        let heap_start = load_end.ceil()+ PAGE_SIZE;
+        mm.start_brk = heap_start;
+        mm.brk = heap_start + USER_HEAP_VMA_INIT_NR_PAGES *PAGE_SIZE;
+        match mm.__alloc_unmapped_core(Some(mm.start_brk),USER_HEAP_VMA_INIT_NR_PAGES*PAGE_SIZE,true,
+                                       Vaddr(USER_SPACE_START),Vaddr(USER_SPACE_END)){
+            None => {
+                panic!("user heap alloc fail");
+            }
+            Some(mut v) => {
+                v.vm_flags = VmFlags::VM_READ|VmFlags::VM_WRITE|VmFlags::VM_EXEC|VmFlags::VM_USER|VmFlags::VM_ANON;
+                v.pagetable = Some(mm.pagetable.clone());
+                // not alloc anon pages
+                // for i in 0..USER_STACK_SIZE_NR_PAGES{
+                //     v._do_alloc_one_page(stack_top+i*PAGE_SIZE);
+                // }
+                mm._insert_no_check(v);
+            }
+        }
+
         //
         // mm.get_unmapped_area(USER_HEAP_SIZE_NR_PAGES*PAGE_SIZE,
         //                      VMAFlags::VM_READ.bits()|VMAFlags::VM_WRITE.bits()|VMAFlags::VM_USER.bits(),

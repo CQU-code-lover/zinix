@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use crate::fs::inode::Inode;
+use crate::info_sync;
 use crate::mm::addr::{PageAlign, Vaddr};
 use crate::mm::get_kernel_mm;
 use crate::mm::vma::VMA;
@@ -82,5 +83,6 @@ impl Drop for KmapToken {
                 // pass
             }
         }
+        info_sync!("Kmap Token Droped");
     }
 }

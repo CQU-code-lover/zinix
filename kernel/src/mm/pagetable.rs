@@ -325,7 +325,7 @@ impl PageTable {
     // return the unmap page`s paddr
     // this func is not pub, because unmap one map in
     // a pages block which len is not 1 is not allowed.
-    fn _unmap_one_page(&self, vaddr: Vaddr) ->Result<Paddr,isize>{
+    pub fn _unmap_one_page(&self, vaddr: Vaddr) ->Result<Paddr,isize>{
         let mut ret:Result<Paddr,isize> = Err(-1);
         let r = self.walk_alloc(vaddr.0);
 
@@ -336,10 +336,8 @@ impl PageTable {
                 let mut pte = PTE::from(pte_val);
                 ret = Ok(Paddr(pte.get_point_paddr()));
                 pte.set_ppn_by_paddr(0);
-                let now_flags = pte.flags;
-                let new_mask = !(PTEFlags::V.bits);
                 // set invalid
-                pte.set_flags(now_flags&new_mask);
+                pte.clear_flags(PTEFlags::V.bits);
                 let new_pte_val = pte.into();
                 unsafe { set_usize_by_addr(r.pte_addr, new_pte_val) };
             },
@@ -380,7 +378,7 @@ impl PageTable {
     pub unsafe fn flush_self(&self){
         sfence_vma_all();
     }
-    fn _get_root_page_vaddr(& self) ->Vaddr{
+    pub fn _get_root_page_vaddr(& self) ->Vaddr{
         self.private_pgs.lock_irq().unwrap()[0].get_vaddr()
     }
 }

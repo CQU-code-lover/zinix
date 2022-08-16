@@ -38,6 +38,6 @@ pub unsafe fn do_test(){
     // shutdown();
     // Task::create_user_task_and_run("entry-static.exe",vec!["statvfs".to_string()]);
     // shutdown();
-    // Task::create_user_task_and_run("busybox_unstripped",vec!["yes".to_string()]);
+    Task::create_user_task_and_run("busybox_unstripped",vec!["yes".to_string()]);
     // Task::create_user_task_and_run("busybox_unstripped",vec!["busybox".to_string(),"cat".to_string(),"2.txt".to_string()]);
 }

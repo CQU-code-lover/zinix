@@ -1,19 +1,21 @@
 pub mod timer;
 
 use core::arch::global_asm;
+use core::arch::riscv64::{fence_i, sfence_vma_all, sfence_vma_vaddr};
 use core::fmt::{Debug, Formatter};
 use core::mem::size_of;
 use log::debug;
 use riscv::register::{sie, sstatus, stvec, scause};
 use riscv::register::scause::{Exception, Interrupt, Scause, Trap};
 use riscv::register::stvec::TrapMode;
-use crate::{debug_sync, println};
-use crate::asm::{disable_irq, enable_irq, r_scause, r_stval};
+use crate::{debug_sync, println, warn_sync};
+use crate::asm::{disable_irq, enable_irq, r_satp, r_scause, r_stval};
 use crate::consts::PHY_MEM_OFFSET;
 use crate::mm::{get_kernel_mm, get_kernel_pagetable};
-use crate::mm::addr::{PageAlign, Vaddr};
-use crate::mm::pagetable::PTEFlags;
+use crate::mm::addr::{Paddr, PageAlign, Vaddr};
+use crate::mm::pagetable::{PageTable, PTEFlags};
 use crate::mm::vma::VMA;
+use crate::pre::InnerAccess;
 use crate::sbi::shutdown;
 use crate::syscall::syscall_entry;
 use crate::task::task::{get_running, RUNNING_TASK};
@@ -290,18 +292,33 @@ fn trap_page_fault_handler(vaddr:Vaddr) ->bool{
     let v = vaddr.floor();
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
+    let mut mm = get_kernel_mm();
     if tsk.is_kern(){
-        match get_kernel_mm().find_vma(v){
+        let vma_opt = mm.find_vma(v);
+        match vma_opt{
             None => {
                 panic!("error address access!");
             }
             Some(vma) => {
                 if vma._find_page(v).is_some(){
                     // 已经映射过 说明存在权限访问问题
-                    panic!("error address prot!");
+                    let walk = vma.pagetable.as_ref().unwrap().walk(v.get_inner()).unwrap();
+                    let pte = walk.get_pte();
+                    let paddr =pte.get_point_paddr();
+                    let flags =  pte.flags;
+                    // unsafe { fence_i(); }
+                    // warn_sync!("error address prot");
+                    let satp = r_satp();
+                    let pgt = (satp&0xFFFFFFFFFFFFF)<<12;
+                    println!("pgt:{:#X}",pgt);
+                    let paddr:Paddr =mm.pagetable._get_root_page_vaddr().into();
+                    println!("pggt:{:#X}",paddr);
+                    panic!("error address prot!va:{:#X},pa:{:#X},PTEflags:{:b}",v,paddr,flags);
+                } else {
+
+                    vma._do_alloc_one_page(v).unwrap();
+                    return true;
                 }
-                vma._do_alloc_one_page(v).unwrap();
-                return true;
             }
         }
     } else {
@@ -321,4 +338,6 @@ fn trap_page_fault_handler(vaddr:Vaddr) ->bool{
             }
         }
     }
+    unsafe { mm.install_pagetable(); }
+    return true;
 }

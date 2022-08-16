@@ -216,6 +216,11 @@ impl VMA {
     pub fn get_end_vaddr(&self) -> Vaddr {
         self.end_vaddr
     }
+    pub fn __set_end_vaddr(&mut self,new:Vaddr) -> Vaddr {
+        let ret = self.end_vaddr;
+        self.end_vaddr = new;
+        ret
+    }
     pub fn in_vma(&self, vaddr: Vaddr) ->bool{
         vaddr >=self.start_vaddr && vaddr <self.end_vaddr
     }
@@ -316,7 +321,10 @@ impl VMA {
         if !self.pages_tree.contains_key(&vaddr) {
             let pages = alloc_one_page().unwrap();
             let flags = self.get_flags();
-            self.pagetable.as_mut().unwrap().map_one_page(vaddr, pages.get_paddr(), _vma_flags_2_pte_flags(flags));
+            let map_ret = self.pagetable.as_mut().unwrap().map_one_page(vaddr, pages.get_paddr(), _vma_flags_2_pte_flags(flags));
+            if map_ret.is_err(){
+                panic!("err");
+            }
             self.pages_tree.insert(vaddr, pages);
         }
     }
@@ -330,9 +338,10 @@ impl VMA {
         debug_assert!(self.in_vma(vaddr));
         debug_assert!(vaddr.is_align());
         if !self._vaddr_have_map(vaddr) {
+
             let pages = alloc_one_page().unwrap();
             let flags = self.get_flags();
-            self.pagetable.as_mut().unwrap().map_one_page(vaddr, pages.get_paddr(), _vma_flags_2_pte_flags(flags));
+            self.pagetable.as_mut().unwrap().map_one_page(vaddr, pages.get_paddr(), _vma_flags_2_pte_flags(flags)).unwrap();
             self.pages_tree.insert(vaddr, pages.clone());
             return pages;
         } else {
@@ -403,6 +412,8 @@ impl VMA {
         match self.pages_tree.remove(&vaddr) {
             None => {}
             Some(pg) => {
+                // do unmap pagetable
+                self.pagetable.as_mut().unwrap()._unmap_one_page(vaddr).unwrap();
                 if self.is_anon(){
                     todo!()
                 } else {
@@ -419,6 +430,15 @@ impl VMA {
     }
     pub fn _release_all_page(&mut self){
         todo!()
+    }
+}
+
+impl Drop for VMA {
+    fn drop(&mut self) {
+        for (vaddr,v) in &self.pages_tree{
+            assert_eq!(v.get_order(), 0);
+            self.pagetable.as_mut().unwrap()._unmap_one_page(*vaddr);
+        }
     }
 }
 

@@ -11,6 +11,7 @@ use crate::{error_sync, info_sync, println, trace_sync};
 use crate::fs::dfile::OldDFile;
 use crate::sbi::shutdown;
 use crate::syscall::sys_fs::syscall_fs_entry;
+use crate::syscall::sys_proc::syscall_proc_entry;
 use crate::task::exit_self;
 use crate::task::task::get_running;
 use crate::trap::TrapFrame;
@@ -106,6 +107,9 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
         SYSCALL_OPENAT|SYSCALL_SENDFILE|SYSCALL_WRITEV|SYSCALL_WRITE|SYSCALL_READ|
         SYSCALL_DUP|SYSCALL_DUP3|SYSCALL_CLOSE => {
             syscall_fs_entry(trap_frame,syscall_id);
+        }
+        SYSCALL_BRK => {
+            syscall_proc_entry(trap_frame,syscall_id);
         }
         _ => {
             error_sync!("syscall not register");

@@ -76,6 +76,14 @@ pub fn w_satp(val:usize){
     }
 }
 
+pub fn r_satp()->usize{
+    let mut val:usize = 0;
+    unsafe {
+        asm!("csrr {},satp", out(reg) val);
+    }
+    val
+}
+
 pub fn r_tp()->usize{
     let mut tp:usize = 0;
     unsafe {

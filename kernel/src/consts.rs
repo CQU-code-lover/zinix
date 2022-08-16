@@ -4,7 +4,7 @@
 pub const USER_SPACE_START:usize = 0x0;
 // pub const  USER_SPACE_END:usize = 0x4000000000;
 pub const USER_SPACE_END:usize = 0x10000000;
-pub const USER_HEAP_SIZE_NR_PAGES:usize = 16;
+pub const USER_HEAP_VMA_INIT_NR_PAGES:usize = 1;
 pub const USER_STACK_SIZE_NR_PAGES:usize = 16;
 pub const USER_STACK_SIZE_ORDER:usize = 4;
 // pub const  USER_STACK_MAX_ADDR:usize = 0x4000000000;
