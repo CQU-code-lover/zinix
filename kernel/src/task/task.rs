@@ -27,10 +27,11 @@ use crate::fs::fat::get_fatfs;
 use crate::fs::fcntl::OpenFlags;
 use crate::fs::get_dentry_from_dir;
 use crate::fs::inode::{ Inode};
-use crate::mm::{alloc_pages, get_kernel_pagetable};
+use crate::mm::{alloc_one_page, alloc_pages, get_kernel_pagetable};
 use crate::mm::addr::{Addr, PageAlign, Vaddr};
 use crate::mm::kmap::KmapToken;
 use crate::mm::page::Page;
+use crate::mm::vma::VMA;
 use crate::pre::InnerAccess;
 use crate::utils::{order2pages, pages2order};
 use crate::sbi::shutdown;
@@ -190,6 +191,15 @@ impl Task {
         set_running(t.clone());
         add_task(t);
     }
+    pub fn get_tgid(&self)->usize{
+        self.tgid
+    }
+    pub fn get_parent(&self)->Option<Arc<SpinLock<Task>>>{
+        if self.parent.is_none() {
+            return None;
+        }
+        self.parent.as_ref().unwrap().upgrade()
+    }
     pub fn get_status(&self)->TaskStatus{
         self.status
     }
@@ -286,8 +296,9 @@ impl Task {
                                              node.clone(),0, file_len).unwrap();
         let read_buf = kmap_token.get_buf();
         let cnt = kmap_token.get_len();
-
         let (mm_struct, mut auxv, entry_point) = MmStruct::new_from_elf(&(*read_buf)[..cnt],node.clone());
+        // kamp 会占用kernel pagetable 使用期间不能够切换页表
+        drop(kmap_token);
 
         trace_sync!("New User Task: entry point={:#X}",entry_point);
         let mut tsk = Task {
@@ -314,9 +325,20 @@ impl Task {
         tf.x2 = tsk.context.sp;
 
         // install user task pgt to access user stack
-        tsk.mm.as_ref().unwrap().install_pagetable();
-        let walk_ret = tsk.mm.as_ref().unwrap().pagetable.walk(0xFFFFFEE);
-        let mut user_sp = USER_STACK_MAX_ADDR;
+        // tsk.mm.as_ref().unwrap().install_pagetable();
+        // let walk_ret = tsk.mm.as_ref().unwrap().pagetable.walk(0xFFFFFEE);
+        let stack_vma = match tsk.mm.as_mut().unwrap().find_vma(Vaddr(USER_STACK_MAX_ADDR-PAGE_SIZE)) {
+            None => {
+                return None;
+            }
+            Some(t) => {
+                t
+            }
+        };
+        let stack_args_pg= stack_vma.__fast_alloc_one_page_and_get(Vaddr(USER_STACK_MAX_ADDR-PAGE_SIZE));
+        // let mut user_sp = USER_STACK_MAX_ADDR;
+        let user_sp_start = (stack_args_pg.get_vaddr()+PAGE_SIZE).get_inner();
+        let mut user_sp = user_sp_start;
         ////////////// envp[] ///////////////////
         let mut env: Vec<String> = Vec::new();
         env.push(String::from("SHELL=/user_shell"));
@@ -337,7 +359,8 @@ impl Task {
         envp[env.len()] = 0;
         for i in 0..env.len() {
             user_sp -= env[i].len() + 1;
-            envp[i] = user_sp;
+            // envp[i] = user_sp;
+            envp[i] = user_sp+USER_STACK_MAX_ADDR-user_sp_start;
             let mut p = user_sp;
             // write chars to [user_sp, user_sp + len]
             for c in env[i].as_bytes() {
@@ -356,7 +379,8 @@ impl Task {
         for i in 0..args.len() {
             user_sp -= args[i].len() + 1;
             // println!("user_sp {:X}", user_sp);
-            argv[i] = user_sp;
+            // argv[i] = user_sp;
+            argv[i] = user_sp+USER_STACK_MAX_ADDR-user_sp_start;
             let mut p = user_sp;
             // write chars to [user_sp, user_sp + len]
             for c in args[i].as_bytes() {
@@ -383,7 +407,7 @@ impl Task {
         ////////////// rand bytes ///////////////////
         user_sp -= 16;
         p = user_sp;
-        auxv.push(AuxHeader{aux_type: AT_RANDOM, value: user_sp});
+        auxv.push(AuxHeader{aux_type: AT_RANDOM, value: user_sp+USER_STACK_MAX_ADDR-user_sp_start});
         for i in 0..0xf {
             *( p as *mut u8) = i as u8;
             p += 1;
@@ -401,7 +425,7 @@ impl Task {
         // auxv.push(AuxHeader{aux_type: AT_NULL, value:0});// end
         user_sp -= auxv.len() * core::mem::size_of::<AuxHeader>();
 
-        let auxv_base = user_sp;
+        let auxv_base = user_sp+USER_STACK_MAX_ADDR-user_sp_start;
         // println!("[auxv]: base 0x{:X}", auxv_base);
         for i in 0..auxv.len() {
             // println!("[auxv]: {:?}", auxv[i]);
@@ -412,7 +436,7 @@ impl Task {
 
         ////////////// *envp [] //////////////////////
         user_sp -= (env.len() + 1) * core::mem::size_of::<usize>();
-        let envp_base = user_sp;
+        let envp_base = user_sp+USER_STACK_MAX_ADDR-user_sp_start;
         *((user_sp + core::mem::size_of::<usize>() * (env.len())) as *mut usize) = 0;
         for i in 0..env.len() {
             *((user_sp + core::mem::size_of::<usize>() * i) as *mut usize) = envp[i] ;
@@ -420,7 +444,7 @@ impl Task {
 
         ////////////// *argv [] //////////////////////
         user_sp -= (args.len() + 1) * core::mem::size_of::<usize>();
-        let argv_base = user_sp;
+        let argv_base = user_sp+USER_STACK_MAX_ADDR-user_sp_start;
         *((user_sp + core::mem::size_of::<usize>() * (args.len())) as *mut usize) = 0;
         for i in 0..args.len() {
             *((user_sp + core::mem::size_of::<usize>() * i) as *mut usize) = argv[i] ;
@@ -430,7 +454,11 @@ impl Task {
         user_sp -= core::mem::size_of::<usize>();
         *(user_sp as *mut usize) = args.len();
 
-        tf.sscratch = user_sp;
+        let have_used = user_sp_start - user_sp;
+        assert!(have_used<PAGE_SIZE);
+
+        // tf.sscratch = user_sp;
+        tf.sscratch = USER_STACK_MAX_ADDR-have_used;
         tf.x10 = args.len();
         tf.x11 = argv_base;
         tf.x12 = envp_base;

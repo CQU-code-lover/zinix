@@ -2,6 +2,7 @@ use alloc::collections::{BTreeMap, LinkedList};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::arch::riscv64::fence_i;
 use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::default::Default;
@@ -19,7 +20,7 @@ use crate::mm::mm::MmStruct;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{PageTable, PTEFlags};
 use crate::pre::{InnerAccess, ReadWriteOffUnsafe, ReadWriteSingleNoOff, ReadWriteSingleOff, ShowRdWrEx};
-use crate::{println, SpinLock};
+use crate::{error_sync, info_sync, println, SpinLock};
 use crate::fs::inode::Inode;
 
 bitflags! {
@@ -206,10 +207,6 @@ impl VMA {
     fn __set_dirty(&mut self){
         self.vm_flags.set(VmFlags::VM_DIRTY,true);
     }
-    // 不会检查是否key已经存在
-    pub fn _anon_insert_pages(&mut self,vaddr:Vaddr,pages:Arc<Page>){
-        self.pages_tree.insert(vaddr, pages);
-    }
     pub fn get_start_vaddr(&self) -> Vaddr {
         self.start_vaddr
     }
@@ -238,11 +235,14 @@ impl VMA {
     // 可能的错误： -1 映射物理页超出vma范围
     //           -1 虚拟页存在映射
     // todo 支持force map
-    pub fn _anon_map_pages(&mut self, pages:Arc<Page>, vaddr: Vaddr) ->Result<(),()>{
+    pub fn _anon_map_one_page(&mut self, page:Arc<Page>, vaddr: Vaddr) ->Result<(),()>{
         debug_assert!(self.is_anon());
         debug_assert!(vaddr.is_align());
         debug_assert!(self.in_vma(vaddr));
-        let pgs_cnt = order2pages(pages.get_order());
+        if page.get_order()!=0{
+            return Err(());
+        }
+        let pgs_cnt = order2pages(page.get_order());
         if (self.get_end_vaddr()-vaddr.0).0 < pgs_cnt*PAGE_SIZE {
             return Err(());
         }
@@ -252,9 +252,16 @@ impl VMA {
         if self._vaddr_have_map(vaddr) {
             return Err(());
         }
-        self.pagetable.as_mut().unwrap().map_pages(vaddr,pages.get_vaddr().into(),pages.get_order(),pte_flags).unwrap();
+        match self.pagetable.as_mut().unwrap().map_pages(vaddr, page.get_vaddr().into(), page.get_order(), pte_flags){
+            Ok(_) => {}
+            Err(_) => {
+                return Err(());
+            }
+        }
         self.phy_pgs_cnt += pgs_cnt;
-        self._anon_insert_pages(vaddr,pages);
+        if self.pages_tree.insert(vaddr, page).is_some(){
+            return Err(());
+        }
         Ok(())
     }
     // 只能按照page block的方式unmap
@@ -321,8 +328,20 @@ impl VMA {
         if !self.pages_tree.contains_key(&vaddr) {
             let pages = alloc_one_page().unwrap();
             let flags = self.get_flags();
+            if pages.get_paddr().get_inner()==0x87ff9000{
+                let pgt = self.pagetable.as_mut().unwrap();
+                let paddr:Paddr = pgt._get_root_page_vaddr().into();
+                pgt.walk(vaddr.get_inner());
+                info_sync!("fast alloc pgt:{:#X},vaddr:{:#X}",paddr,vaddr);
+                println!("1");
+            }
             let map_ret = self.pagetable.as_mut().unwrap().map_one_page(vaddr, pages.get_paddr(), _vma_flags_2_pte_flags(flags));
             if map_ret.is_err(){
+                let pgt = self.pagetable.as_mut().unwrap();
+                let paddr:Paddr = pgt._get_root_page_vaddr().into();
+                let ret = pgt.walk(vaddr.get_inner()).unwrap();
+                let ret_2 = get_kernel_pagetable().walk(vaddr.get_inner());
+                error_sync!("fast alloc error pgt:{:#X},vaddr:{:#X}",paddr,vaddr);
                 panic!("err");
             }
             self.pages_tree.insert(vaddr, pages);
@@ -334,7 +353,7 @@ impl VMA {
             self.__fast_alloc_one_page(i);
         }
     }
-    fn __fast_alloc_one_page_and_get(&mut self, vaddr:Vaddr) ->Arc<Page>{
+    pub fn __fast_alloc_one_page_and_get(&mut self, vaddr:Vaddr) ->Arc<Page>{
         debug_assert!(self.in_vma(vaddr));
         debug_assert!(vaddr.is_align());
         if !self._vaddr_have_map(vaddr) {
@@ -401,6 +420,11 @@ impl VMA {
                     assert_eq!(real_read,need_read);
                 }
             }
+            // 由于修改了page 所以fence.i需要用于清空icache
+            // todo check
+            if self.execable(){
+                unsafe { fence_i(); }
+            }
         }
         if self.writeable(){
             // set dirty
@@ -437,6 +461,8 @@ impl Drop for VMA {
     fn drop(&mut self) {
         for (vaddr,v) in &self.pages_tree{
             assert_eq!(v.get_order(), 0);
+            let p:Paddr = self.pagetable.as_mut().unwrap()._get_root_page_vaddr().into();
+            info_sync!("VMA unmap pgt:{:#X},vaddr:{:#X}",p,vaddr);
             self.pagetable.as_mut().unwrap()._unmap_one_page(*vaddr);
         }
     }

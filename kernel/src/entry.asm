@@ -150,8 +150,8 @@ boot_stack_top:
     .align 12
     .global boot_pagetable
 boot_pagetable:
-    .quad (0 << 10) | 0xcf # VRWXAD
-    .zero 8 * 1
+    #.quad (0 << 10) | 0xcf # VRWXAD
+    .zero 8 * 2
     .quad (0x80000 << 10) | 0xcf # VRWXAD
     .zero 8 * 351
     .quad (0x80000 << 10) | 0xcf # VRWXAD

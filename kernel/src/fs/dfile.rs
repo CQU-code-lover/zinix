@@ -245,6 +245,16 @@ impl DFileMutInner {
     pub fn writeable(&self)->bool{
         self.open_flags.writeable()
     }
+    pub fn clone_inode(&self)->Option<Arc<Inode>>{
+        match &self.class{
+            DFileClass::ClassInode(i) => {
+                Some(i.clone())
+            }
+            _=>{
+                None
+            }
+        }
+    }
     pub fn read(&mut self,buf:&mut [u8])->Result<usize,()>{
         if !self.readable(){
             return Err(());
@@ -397,6 +407,9 @@ lazy_static!{
 
 // Terminal类型不需要OpenFlags
 impl DFile {
+    pub fn clone_inode(&self)->Option<Arc<Inode>>{
+        self.inner.lock_irq().unwrap().clone_inode()
+    }
     pub fn new_stdin() -> Self {
         Self {
             inner: SpinLock::new(DFileMutInner {

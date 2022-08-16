@@ -4,13 +4,14 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
+use core::arch::riscv64::fence_i;
 use core::cell::RefCell;
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use log::error;
 
-use crate::{error_sync, println, SpinLock};
+use crate::{error_sync, info_sync, println, SpinLock};
 use crate::mm::mm::MmStruct;
 use crate::mm::pagetable::PageTable;
 use crate::sbi::shutdown;
@@ -19,6 +20,7 @@ use crate::task::task::TaskStatus::TaskZombie;
 
 pub(crate) mod task;
 pub(crate) mod stack;
+pub(crate) mod info;
 
 
 extern "C" {
@@ -59,6 +61,7 @@ pub fn get_task() -> Arc<SpinLock<Task>> {
 }
 
 pub fn scheduler() {
+    // info_sync!("schedule");
     let mut rs = running_list.lock().unwrap();
     // bug raise
     assert_ne!(rs.len(), 0);
@@ -99,7 +102,6 @@ pub fn scheduler() {
     }
     drop(next_locked);
     drop(rs);
-
     unsafe {
         switch_context(ctx_cur, ctx_next);
     }

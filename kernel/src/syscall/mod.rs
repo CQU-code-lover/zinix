@@ -9,12 +9,14 @@ use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use fatfs::error;
 use crate::{error_sync, info_sync, println, trace_sync};
 use crate::fs::dfile::OldDFile;
+use crate::mm::addr::Vaddr;
 use crate::sbi::shutdown;
 use crate::syscall::sys_fs::syscall_fs_entry;
 use crate::syscall::sys_proc::syscall_proc_entry;
 use crate::task::exit_self;
 use crate::task::task::get_running;
 use crate::trap::TrapFrame;
+use crate::utils::convert_cstr_from_vaddr;
 
 pub const SYSCALL_GETCWD: usize = 17;
 pub const SYSCALL_DUP: usize = 23;
@@ -53,6 +55,7 @@ pub const SYSCALL_CLOCK_GETTIME: usize = 113;
 pub const SYSCALL_YIELD: usize = 124;
 pub const SYSCALL_KILL: usize = 129;
 pub const SYSCALL_SIGACTION: usize = 134;
+pub const SYSCALL_SIGPROCMASK: usize = 135;
 pub const SYSCALL_SIGRETURN: usize = 139;
 pub const SYSCALL_TIMES: usize = 153;
 pub const SYSCALL_UNAME: usize = 160;
@@ -85,6 +88,19 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
     let syscall_id = trap_frame.x17;
     trace_sync!("[syscall:{}]",syscall_id);
     match syscall_id {
+        SYSCALL_NEW_FSTATAT=>{
+            let str = convert_cstr_from_vaddr(Vaddr(trap_frame.arg1()));
+            println!("{}",str);
+            shutdown();
+        }
+
+        // todo signal
+        SYSCALL_SIGACTION => {
+            trap_frame.ok()
+        }
+        SYSCALL_SIGPROCMASK =>{
+            trap_frame.ok()
+        }
         SYSCALL_EXIT =>{
             println!("EXIT");
             trap_frame.ok();
@@ -108,7 +124,7 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
         SYSCALL_DUP|SYSCALL_DUP3|SYSCALL_CLOSE => {
             syscall_fs_entry(trap_frame,syscall_id);
         }
-        SYSCALL_BRK => {
+        SYSCALL_BRK|SYSCALL_MMAP|SYSCALL_GETPID|SYSCALL_GETPPID|SYSCALL_UNAME => {
             syscall_proc_entry(trap_frame,syscall_id);
         }
         _ => {

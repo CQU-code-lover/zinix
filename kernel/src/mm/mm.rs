@@ -8,7 +8,7 @@ use core::ops::Bound::{Excluded, Included};
 use xmas_elf::ElfFile;
 use xmas_elf::program::Type::Load;
 
-use crate::consts::{MMAP_TOP, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, TMMAP_END, TMMAP_START, USER_HEAP_VMA_INIT_NR_PAGES, USER_SPACE_END, USER_SPACE_START, USER_STACK_MAX_ADDR, USER_STACK_SIZE_NR_PAGES};
+use crate::consts::{MMAP_TOP, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, KMAP_END, KMAP_START, USER_HEAP_VMA_INIT_NR_PAGES, USER_SPACE_END, USER_SPACE_START, USER_STACK_MAX_ADDR, USER_STACK_SIZE_NR_PAGES};
 use crate::fs::inode::Inode;
 use crate::mm::addr::{Addr, PageAlign, PFN, Vaddr};
 use crate::mm::{alloc_one_page, alloc_pages, get_kernel_pagetable};
@@ -249,7 +249,7 @@ impl MmStruct {
     // kmap 默认不需要指定vaddr
     pub fn alloc_kmap_anon(&self,len:usize)->Option<VMA> {
         let to_high = true;
-        self.__alloc_unmapped_core(None,len,to_high,Vaddr(TMMAP_START),Vaddr(TMMAP_END)).map(
+        self.__alloc_unmapped_core(None, len, to_high, Vaddr(KMAP_START), Vaddr(KMAP_END)).map(
             |mut vma| {
                 vma.pagetable = Some(self.pagetable.clone());
                 vma.vm_flags = VmFlags::VM_READ|VmFlags::VM_WRITE|VmFlags::VM_EXEC|VmFlags::VM_ANON;
@@ -260,7 +260,7 @@ impl MmStruct {
     pub fn alloc_kmap_file(&self, len:usize, file:Arc<Inode>, file_off:usize, file_len:usize) ->Option<VMA> {
         let to_high = true;
         assert!(file_len<=len);
-        self.__alloc_unmapped_core(None,len,to_high,Vaddr(TMMAP_START),Vaddr(TMMAP_END)).map(
+        self.__alloc_unmapped_core(None, len, to_high, Vaddr(KMAP_START), Vaddr(KMAP_END)).map(
             |mut vma| {
                 vma.pagetable = Some(self.pagetable.clone());
                 vma.file_off = file_off;

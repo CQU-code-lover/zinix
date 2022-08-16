@@ -136,10 +136,10 @@ def qemu_run(self,debug):
         exit(-1)
     print("build all OK!")
     print("start run...")
-    cmd = "qemu-system-riscv64 \
+    cmd = "qemu-system-riscv64\
                -machine virt \
               -nographic \
-              -bios ../bootloader/rustsbi-qemu.bin \
+              -bios ../bootloader/new_opensbi.elf \
               -device loader,addr=0x80200000,file="+KERNEL_BIN+" " + \
     "-drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0"
     if debug:

@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use crate::{info, trace};
 use virtio_drivers::{VirtIOBlk, VirtIOHeader};
-use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET};
+use crate::consts::{DEV_REMAP_START, PAGE_SIZE, PHY_MEM_OFFSET};
 use crate::io::{BlockRead, BlockReadWrite, BlockWrite};
 use crate::mm::addr::{OldAddr, Paddr, PFN, Vaddr};
 use crate::mm::alloc_pages;
@@ -14,7 +14,7 @@ use crate::pre::InnerAccess;
 use crate::utils::{order2pages, pages2order};
 
 #[allow(unused)]
-const VIRTIO0: usize = 0x10001000;
+const VIRTIO0: usize = 0x10001000+DEV_REMAP_START;
 
 pub struct VirtioDev {
     inner:SpinLock<VirtIOBlk<'static>>

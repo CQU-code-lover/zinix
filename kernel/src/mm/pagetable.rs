@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use core::arch::riscv64::sfence_vma_vaddr;
 use core::borrow::Borrow;
 use core::cmp::Ordering;
+use core::sync::atomic::AtomicBool;
 use fatfs::debug;
 use log::log;
 use log::error;
@@ -11,7 +12,7 @@ use riscv::asm::sfence_vma_all;
 use riscv::register::satp::Satp;
 
 use crate::consts::{PAGE_SIZE, PHY_MEM_OFFSET};
-use crate::{debug_sync, error_sync, println, SpinLock, trace_sync};
+use crate::{debug_sync, error_sync, info_sync, println, SpinLock, trace_sync};
 use crate::asm::w_satp;
 use crate::mm::{alloc_one_page, alloc_pages, get_kernel_pagetable, skernel};
 use crate::mm::addr::{OldAddr, Paddr, PageAlign, PFN, Vaddr};
@@ -56,6 +57,7 @@ impl WalkRet {
 impl PageTable {
     pub fn new_user()->Self{
         let mut p = PageTable::default();
+        // get_kernel_pagetable().walk(0xFFF0000);
         let root_addr = get_kernel_pagetable()._get_root_page_vaddr().get_inner();
         for i in (0..PAGE_SIZE).filter(|x|{x%8==0}) {
             unsafe {
@@ -69,8 +71,10 @@ impl PageTable {
     pub unsafe fn install(&self){
         let p:Paddr = self._get_root_page_vaddr().into();
         let paddr = p.get_inner();
+        info_sync!("switch pagetable:{:#X}",paddr);
         let satp_val = ((8 as usize) <<60)|(paddr>>12);
         w_satp(satp_val);
+        sfence_vma_all();
     }
     fn _insert_new_pages(&self,pgs : Arc<Page>) {
         self.private_pgs.lock_irq().unwrap().push(pgs)

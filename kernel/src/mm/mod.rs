@@ -15,12 +15,13 @@ use pagetable::create_kernel_pagetable;
 use pagetable::PageTable;
 
 use crate::{consts, info_sync, println, SpinLock, trace_sync};
-use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, PHY_MEM_START};
+use crate::consts::{DEV_REMAP_START, DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE, PHY_MEM_OFFSET, PHY_MEM_START};
 use crate::mm::addr::{addr_test, OldAddr, PageAlign, PFN, Vaddr};
 use crate::mm::bitmap::bitmap_test;
 use crate::mm::mm::MmStruct;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{create_kernel_mm, PTE, PTEFlags};
+use crate::pre::InnerAccess;
 use crate::sbi::shutdown;
 use crate::sync::SpinLockGuard;
 use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
@@ -93,10 +94,10 @@ fn hardware_address_map_init(){
     #[cfg(feature = "qemu")]
     {
         for i in 0x10001..0x10300{
-           pgt._force_map_one(0+PAGE_SIZE*i, 0+PAGE_SIZE*i, 0xcf);
+           pgt._force_map_one(0+PAGE_SIZE*i+DEV_REMAP_START, 0+PAGE_SIZE*i, 0xcf);
         }
     }
-    trace_sync!("map virt ok");
+    info_sync!("remap hardware ok");
 }
 
 pub fn _insert_area_for_page_drop(vaddr:Vaddr, order:usize) ->Result<(),isize>{
@@ -136,6 +137,9 @@ pub fn alloc_pages(order:usize)->Option<Arc<Page>>{
         Ok(vaddr) => {
             let pgs = PAGES_MANAGER.lock().unwrap().new_pages_block_in_memory(vaddr, order);
             pgs.clear_pages_block();
+            if pgs.get_paddr().get_inner() == 0x87FAF000{
+                println!("1");
+            }
             Some(pgs)
         }
         _ => {

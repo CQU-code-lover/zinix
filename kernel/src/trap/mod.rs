@@ -1,6 +1,6 @@
 pub mod timer;
 
-use core::arch::global_asm;
+use core::arch::{asm, global_asm};
 use core::arch::riscv64::{fence_i, sfence_vma_all, sfence_vma_vaddr};
 use core::fmt::{Debug, Formatter};
 use core::mem::size_of;
@@ -8,14 +8,14 @@ use log::debug;
 use riscv::register::{sie, sstatus, stvec, scause};
 use riscv::register::scause::{Exception, Interrupt, Scause, Trap};
 use riscv::register::stvec::TrapMode;
-use crate::{debug_sync, println, warn_sync};
+use crate::{debug_sync, info_sync, println, warn_sync};
 use crate::asm::{disable_irq, enable_irq, r_satp, r_scause, r_stval};
 use crate::consts::PHY_MEM_OFFSET;
 use crate::mm::{get_kernel_mm, get_kernel_pagetable};
 use crate::mm::addr::{Paddr, PageAlign, Vaddr};
 use crate::mm::pagetable::{PageTable, PTEFlags};
 use crate::mm::vma::VMA;
-use crate::pre::InnerAccess;
+use crate::pre::{InnerAccess, ReadWriteSingleNoOff};
 use crate::sbi::shutdown;
 use crate::syscall::syscall_entry;
 use crate::task::task::{get_running, RUNNING_TASK};
@@ -148,11 +148,14 @@ impl TrapFrame {
     pub fn arg4(&self)->usize{
         self.x14
     }
+    pub fn arg5(&self)->usize{
+        self.x15
+    }
 }
 
 #[no_mangle]
 fn irq_handler(trap_frame:&mut TrapFrame){
-    unsafe { RUNNING_TASK().lock().unwrap().check_magic(); }
+    unsafe { RUNNING_TASK().lock_irq().unwrap().check_magic(); }
     // debug!("IRQ\n{:?}",trap_frame);
     match scause::read().cause() {
         Trap::Interrupt(irq) => {
@@ -167,6 +170,7 @@ fn irq_handler(trap_frame:&mut TrapFrame){
                     todo!()
                 }
                 Interrupt::SupervisorTimer => {
+                    // info_sync!("tic");
                     timer_entry(trap_frame);
                 }
                 Interrupt::UserExternal => {
@@ -190,7 +194,7 @@ fn exc_handler(trap_frame:&mut TrapFrame){
     debug_sync!("EXC\n{:?}",trap_frame);
     debug_sync!("sstval:{:#X}",r_stval());
     debug_sync!("scause:{:#X}",r_scause());
-    unsafe { RUNNING_TASK().lock().unwrap().check_magic(); }
+    unsafe { RUNNING_TASK().lock_irq().unwrap().check_magic(); }
     match scause::read().cause() {
         Trap::Exception(exc) => {
             unsafe {
@@ -325,7 +329,9 @@ fn trap_page_fault_handler(vaddr:Vaddr) ->bool{
         let mut m = tsk.mm.as_mut().unwrap();
         match m.find_vma(v){
             None => {
-                panic!("error address access!");
+                let p:Paddr = m.pagetable._get_root_page_vaddr().into();
+                m.pagetable.walk(0x10154);
+                panic!("error address access!{:#X} {:#X}",p,r_satp()<<12);
             }
             Some(vma) => {
                 if vma._find_page(v).is_some(){
@@ -338,6 +344,4 @@ fn trap_page_fault_handler(vaddr:Vaddr) ->bool{
             }
         }
     }
-    unsafe { mm.install_pagetable(); }
-    return true;
 }

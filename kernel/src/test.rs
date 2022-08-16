@@ -1,5 +1,6 @@
 use alloc::string::{String, ToString};
 use alloc::vec;
+use core::arch::asm;
 use core::ptr::slice_from_raw_parts;
 use fatfs::{FsOptions, IntoStorage, Read, Seek, SeekFrom, Write};
 use riscv::register::sstatus::Sstatus;
@@ -33,11 +34,12 @@ unsafe fn test_kmap(){
 pub unsafe fn do_test(){
     // mm_test();
     // test_kmap();
-    Task::create_user_task_and_run("m.o",vec![]);
+    // Task::create_user_task_and_run("m.o",vec![]);
     // virtio_test();
     // shutdown();
     // Task::create_user_task_and_run("entry-static.exe",vec!["statvfs".to_string()]);
     // shutdown();
-    Task::create_user_task_and_run("busybox_unstripped",vec!["yes".to_string()]);
+    // Task::create_user_task_and_run("busybox_unstripped",vec!["yes".to_string()]);
     // Task::create_user_task_and_run("busybox_unstripped",vec!["busybox".to_string(),"cat".to_string(),"2.txt".to_string()]);
+    Task::create_user_task_and_run("busybox_unstripped",vec!["busybox".to_string(),"sh".to_string(),"busybox_testcode.sh".to_string()]);
 }

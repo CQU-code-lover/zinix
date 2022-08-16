@@ -11,8 +11,8 @@ pub const USER_STACK_SIZE_ORDER:usize = 4;
 pub const USER_STACK_MAX_ADDR:usize = 0x10000000;
 pub const MMAP_TOP:usize = 0x8000000;
 // kernel template map :4GB
-pub const TMMAP_START:usize = 0xffffffc600000000;
-pub const TMMAP_END:usize = 0xffffffc700000000;
+pub const KMAP_START:usize = 0xffffffc600000000;
+pub const KMAP_END:usize = 0xffffffc700000000;
 // vmemmap : 4GB
 pub const VMEMMAP_START:usize = 0xffffffc700000000;
 pub const VMEMMAP_END:usize = 0xffffffc800000000;
@@ -20,6 +20,9 @@ pub const VMEMMAP_END:usize = 0xffffffc800000000;
 // direct map : 124GB
 pub const DIRECT_MAP_START:usize = 0xffffffd800000000;
 pub const DIRECT_MAP_END:usize = 0xfffffff700000000;
+
+pub const DEV_REMAP_START:usize = 0xfffffff700000000;
+pub const DEV_REMAP_END:usize = 0xfffffff800000000;
 
 pub const PAGE_SIZE:usize = 4096;
 pub const PAGE_OFFSET:usize = 12;
