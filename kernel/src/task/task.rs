@@ -242,6 +242,22 @@ impl Task {
         }
         None
     }
+    pub fn alloc_opened_bigger_than(&mut self, file:Arc<DFile>, fd_start:usize) ->Option<usize>{
+        if fd_start >=self.opened.len(){
+            return None;
+        }
+        for i in fd_start..self.opened.len(){
+            match self.opened[i].as_ref(){
+                None => {
+                    // find empty
+                    self.opened[i] = Some(file);
+                    return Some(i);
+                }
+                Some(_) => {}
+            }
+        }
+        None
+    }
     pub fn get_pwd_opened(&mut self) ->Arc<DFile>{
         self.pwd_dfile.clone()
     }

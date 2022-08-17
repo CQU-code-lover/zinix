@@ -3,13 +3,16 @@ use alloc::sync::Arc;
 use core::cmp::min;
 use fatfs::{Date, DateTime, DefaultTimeProvider, Dir, File, FileAttributes, LossyOemCpConverter, Read, SeekFrom, Time, Write};
 use crate::{print, println, SpinLock};
+use crate::consts::DIRECT_MAP_START;
 use crate::fs::dfile::DFILE_TYPE::*;
 use crate::fs::{DirAlias, FileAlias, get_dentry_from_dir};
 use crate::fs::fat::{BlkStorage, get_fatfs};
 use crate::fs::fcntl::OpenFlags;
 use crate::fs::inode::{Inode};
 use crate::io::virtio::VirtioDev;
+use crate::task::info::{NewStat, S_IFDIR, S_IFREG, S_IRWXG, S_IRWXO, S_IRWXU};
 use crate::task::task::get_running;
+use crate::utils::{date2second, datetime2second};
 
 lazy_static!{
     static ref STDIN:Arc<OldDFile> = Arc::new(OldDFile::new_io(DFTYPE_STDIN));
@@ -232,6 +235,7 @@ pub struct DFileMutInner{
     class:DFileClass,
     pos:usize,
     open_flags:OpenFlags,
+    cloexec:bool
 }
 
 pub struct DFile {
@@ -400,7 +404,8 @@ lazy_static!{
             inner: SpinLock::new(DFileMutInner {
                 class: DFileClass::ClassInode(Inode::get_root()),
                 pos: 0,
-                open_flags: OpenFlags::O_RDONLY
+                open_flags: OpenFlags::O_RDONLY,
+                cloexec:false
             })
         });
 }
@@ -417,7 +422,8 @@ impl DFile {
                     ttype: TerminalType::STDIN
                 }),
                 pos: 0,
-                open_flags: OpenFlags::O_RDONLY
+                open_flags: OpenFlags::O_RDONLY,
+                cloexec: false
             })
         }
     }
@@ -428,7 +434,8 @@ impl DFile {
                     ttype: TerminalType::STDOUT
                 }),
                 pos: 0,
-                open_flags: OpenFlags::O_WRONLY
+                open_flags: OpenFlags::O_WRONLY,
+                cloexec: false
             })
         }
     }
@@ -439,8 +446,32 @@ impl DFile {
                     ttype: TerminalType::STDERR
                 }),
                 pos: 0,
-                open_flags: OpenFlags::O_WRONLY
+                open_flags: OpenFlags::O_WRONLY,
+                cloexec: false
             })
+        }
+    }
+    pub fn get_cloexec(&self)->bool{
+        self.inner.lock_irq().unwrap().cloexec
+    }
+    pub fn set_cloexec_to(&self,flag:bool){
+        self.inner.lock_irq().unwrap().cloexec = flag
+    }
+    pub fn is_root_inode(&self)->bool{
+        match &self.inner.lock_irq().unwrap().class{
+            DFileClass::ClassInode(v) => {
+                match v.get_parent(){
+                    None => {
+                        false
+                    }
+                    Some(_) => {
+                        true
+                    }
+                }
+            }
+            DFileClass::ClassTerminal(_) => {
+                false
+            }
         }
     }
     pub fn get_root() -> Arc<Self> {
@@ -451,7 +482,8 @@ impl DFile {
             inner: SpinLock::new(DFileMutInner {
                 class: DFileClass::ClassInode(inode),
                 pos: 0,
-                open_flags
+                open_flags,
+                cloexec: false
             })
         }
     }
@@ -464,7 +496,8 @@ impl DFile {
                             DFileMutInner {
                                 class: DFileClass::ClassInode(inode.clone()),
                                 pos: 0,
-                                open_flags
+                                open_flags,
+                                cloexec: false
                             }
                         )
                     }
@@ -484,7 +517,8 @@ impl DFile {
                             DFileMutInner {
                                 class: DFileClass::ClassInode(x.clone()),
                                 pos: 0,
-                                open_flags
+                                open_flags,
+                                cloexec: false
                             }
                         )
                     }
@@ -509,5 +543,44 @@ impl DFile {
     }
     pub fn seek(&self,pos:SeekFrom)->Result<usize,()> {
         self.inner.lock_irq().unwrap().seek(pos)
+    }
+    pub fn fill_stat(&self,stat: &mut NewStat)->Result<(),()>{
+        match &self.inner.lock_irq().unwrap().class {
+            DFileClass::ClassInode(inode) => {
+                if inode.get_parent().is_some() {
+                    let dentry = inode.get_dentry();
+                    let mode = if dentry.is_dir() {
+                        S_IFDIR | S_IRWXU | S_IRWXG | S_IRWXO
+                    } else {
+                        S_IFREG | S_IRWXU | S_IRWXG | S_IRWXO
+                    };
+                    // s_ino是 inode的指针地址减去偏移
+                    stat.fill_info(0,
+                                   (inode.as_ref() as *const Inode as usize - DIRECT_MAP_START) as u64,
+                                   mode,
+                                   1,
+                                   dentry.len() as i64,
+                                   date2second(dentry.accessed()) as i64,
+                                   datetime2second(dentry.modified()) as i64,
+                                   datetime2second(dentry.created()) as i64);
+                } else {
+                    let mode = S_IFDIR | S_IRWXU | S_IRWXG | S_IRWXO;
+                    // s_ino是 inode的指针地址减去偏移
+                    stat.fill_info(0,
+                                   1,
+                                   mode,
+                                   1,
+                                   0,
+                                   1000,
+                                   1000,
+                                   1000
+                    )
+                }
+            }
+            _ => {
+                return Err(());
+            }
+        }
+        Ok(())
     }
 }

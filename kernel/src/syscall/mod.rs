@@ -88,12 +88,6 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
     let syscall_id = trap_frame.x17;
     trace_sync!("[syscall:{}]",syscall_id);
     match syscall_id {
-        SYSCALL_NEW_FSTATAT=>{
-            let str = convert_cstr_from_vaddr(Vaddr(trap_frame.arg1()));
-            println!("{}",str);
-            shutdown();
-        }
-
         // todo signal
         SYSCALL_SIGACTION => {
             trap_frame.ok()
@@ -121,10 +115,10 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
             trap_frame.ret(0);
         }
         SYSCALL_OPENAT|SYSCALL_SENDFILE|SYSCALL_WRITEV|SYSCALL_WRITE|SYSCALL_READ|
-        SYSCALL_DUP|SYSCALL_DUP3|SYSCALL_CLOSE => {
+        SYSCALL_DUP|SYSCALL_DUP3|SYSCALL_CLOSE|SYSCALL_NEW_FSTATAT|SYSCALL_FCNTL => {
             syscall_fs_entry(trap_frame,syscall_id);
         }
-        SYSCALL_BRK|SYSCALL_MMAP|SYSCALL_GETPID|SYSCALL_GETPPID|SYSCALL_UNAME => {
+        SYSCALL_BRK|SYSCALL_MMAP|SYSCALL_GETPID|SYSCALL_GETPPID|SYSCALL_UNAME|SYSCALL_GETCWD => {
             syscall_proc_entry(trap_frame,syscall_id);
         }
         _ => {

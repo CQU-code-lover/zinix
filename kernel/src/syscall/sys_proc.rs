@@ -34,11 +34,29 @@ pub fn syscall_proc_entry(tf:&mut TrapFrame, syscall_id:usize) {
             ,ret as usize);
             ret
         }
+        SYSCALL_GETCWD =>{
+            let ret = sys_getcwd(tf.arg0(),tf.arg1());
+            trace_sync!("sys_getcwd:buf_addr:{:#X},len:{},ret:{}",tf.arg0(),tf.arg1(),ret);
+            ret
+        }
         _ => {
             panic!("fs syscall {} not impl",syscall_id);
         }
     };
     tf.ret(ret as usize);
+}
+
+fn sys_getcwd(buf:usize,len:usize)->isize{
+    if buf==0{
+        return -1;
+    }
+    let mut s = get_running().lock_irq().unwrap().pwd_ref().clone();
+    s.push('\0');
+    if s.len()>len{
+        return -1;
+    }
+    assert_eq!(Vaddr(buf).write(s.as_bytes()).unwrap(),s.len());
+    0
 }
 
 fn sys_unmae(buf:usize)->isize{

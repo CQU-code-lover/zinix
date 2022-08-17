@@ -1,6 +1,8 @@
 use alloc::string::String;
 use core::ptr::{addr_of, addr_of_mut};
+use fatfs::{Date, DateTime};
 use log::error;
+use xmas_elf::header::Data;
 use crate::consts::{DIRECT_MAP_START, MAX_ORDER, PAGE_OFFSET, PAGE_SIZE};
 use crate::mm::addr::Vaddr;
 use crate::pre::InnerAccess;
@@ -87,4 +89,21 @@ pub fn convert_cstr_from_ptr(ptr: *const u8) -> String{
 
 pub fn convert_cstr_from_vaddr(vaddr:Vaddr)->String{
     convert_cstr_from_ptr(vaddr.get_inner() as *const u8)
+}
+
+const D_SECOND:u64 = 3600*24;
+const M_SECOND:u64 = D_SECOND*30;
+const Y_SECOND:u64 = D_SECOND*365;
+
+pub fn date2second(d:Date)->u64{
+    let y = d.year - 1970;
+    let m = d.month - 1;
+    let d = d.day - 1;
+    y as u64*Y_SECOND + m as u64 *M_SECOND + d  as u64 *D_SECOND
+}
+
+pub fn datetime2second(d:DateTime)->u64{
+    let datesecond = date2second(d.date);
+    let timesecond = d.time.hour as u64 * 3600 + d.time.min as u64 * 60 + d.time.sec as u64;
+    datesecond + timesecond
 }

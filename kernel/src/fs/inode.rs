@@ -91,6 +91,9 @@ impl Inode {
         unsafe { (*mut_ptr).this = Arc::downgrade(&node); }
         node
     }
+    pub fn get_parent(&self)->Option<Arc<Inode>>{
+        self.parent.as_ref().map(|v|{v.clone()})
+    }
     pub fn get_dentry(&self)->DirEntryAlias{
         match &self.parent.as_ref().unwrap().inner.lock_irq().unwrap().class{
             InodeClass::Dir(dir) => {

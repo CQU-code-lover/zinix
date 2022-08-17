@@ -1,12 +1,14 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Add;
+use fatfs::Write;
 use crate::error_sync;
 use crate::fs::dfile::{DFile, DirEntryWrapper};
 use crate::fs::fat::get_fatfs;
 use crate::fs::fcntl::{AT_FDCWD, OpenFlags, OpenMode};
 use crate::fs::{get_dentry_from_dir};
 use crate::mm::addr::Vaddr;
+use crate::task::info::*;
 use crate::trap::TrapFrame;
 use crate::utils::convert_cstr_from_vaddr;
 use super::*;
@@ -50,11 +52,110 @@ pub fn syscall_fs_entry(tf:&mut TrapFrame, syscall_id:usize){
         SYSCALL_CLOSE=>{
             sys_close(tf.arg0() as isize)
         }
+        SYSCALL_NEW_FSTATAT=>{
+            let ret = sys_newfstatat(tf.arg0() as isize,tf.arg1(),tf.arg2(),tf.arg3() as u32);
+            trace_sync!("new_fstatat:fd:{},path_addr:{:#X},buf_addr:{:#X},flags:{:#b},ret:{}",tf.arg0() as isize,tf.arg1(),tf.arg2(),tf.arg3() as u32,ret);
+            ret
+        }
+        SYSCALL_FCNTL=>{
+            let ret = sys_fcntl(tf.arg0(),tf.arg1() as u32,tf.arg2());
+            ret
+        }
         _ => {
             panic!("fs syscall {} not impl",syscall_id);
         }
     };
     tf.ret(ret as usize);
+}
+
+fn sys_fcntl(fd:usize,cmd:u32,arg:usize)->isize{
+    let running = get_running();
+    let mut tsk = running.lock_irq().unwrap();
+    let opened_ret =tsk.get_opened(fd);
+    let mut cmd_str = String::from("fault when fill cmd");
+    let ret = match  opened_ret {
+        None => {
+            -1
+        }
+        Some(file) => {
+            match cmd {
+                F_DUPFD => {
+                    cmd_str = String::from("F_DUPFD");
+                    match tsk.alloc_opened_bigger_than(file,arg) {
+                        None => {
+                            -1
+                        }
+                        Some(newfd) => {
+                            newfd as isize
+                        }
+                    }
+                },
+                F_GETFD=> {
+                    cmd_str = String::from("F_GETFD");
+                    file.get_cloexec() as isize
+                }
+                F_SETFD=> {
+                    cmd_str = String::from("F_SETFD");
+                    file.set_cloexec_to((arg & 1) == 1);
+                    0
+                }
+                F_DUPFD_CLOEXEC =>{
+                    cmd_str = String::from("F_DUPFD_CLOEXEC");
+                    match tsk.alloc_opened_bigger_than(file.clone(),arg) {
+                        None => {
+                            -1
+                        }
+                        Some(newfd) => {
+                            file.set_cloexec_to(true);
+                            newfd as isize
+                        }
+                    }
+                }
+                _=> {
+                    todo!();
+                    return -1;
+                }
+            }
+        }
+    };
+    trace_sync!("fcntl:fd:{},cmd:{},arg:{},ret:{}",fd,cmd_str,arg,ret);
+    ret
+}
+
+fn sys_newfstatat(fd:isize,path_addr:usize,buf:usize,flags:u32)->isize{
+    let path = convert_cstr_from_vaddr(Vaddr(path_addr));
+    let mut stat = NewStat::empty();
+    let running = get_running();
+    let mut tsk = running.lock_irq().unwrap();
+    let dirfile = if fd == AT_FDCWD{
+        tsk.get_pwd_opened()
+    } else {
+        match tsk.get_opened(fd as usize){
+            None => {
+                return -2;
+            }
+            Some(f) => {
+                f
+            }
+        }
+    };
+    match dirfile.open_path(&path,OpenFlags::O_RDONLY){
+        None => {
+            return -2;
+        }
+        Some(f) => {
+            // 这个f是临时构造的
+            match f.fill_stat(&mut stat) {
+                Ok(_) => {
+                    Vaddr(buf).write(stat.as_bytes()).unwrap();
+                    return 0;
+                }
+                Err(_) => {
+                    return -1;
+                }
+            }
+        }
+    }
 }
 
 // 未打开的fd是none 此时会错误返回
