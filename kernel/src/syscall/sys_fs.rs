@@ -8,6 +8,7 @@ use crate::fs::fat::get_fatfs;
 use crate::fs::fcntl::{AT_FDCWD, OpenFlags, OpenMode};
 use crate::fs::{get_dentry_from_dir};
 use crate::mm::addr::Vaddr;
+use crate::pre::ReadWriteSingleNoOff;
 use crate::task::info::*;
 use crate::trap::TrapFrame;
 use crate::utils::convert_cstr_from_vaddr;
@@ -30,6 +31,9 @@ pub fn syscall_fs_entry(tf:&mut TrapFrame, syscall_id:usize){
                            }
                        },
                        OpenMode::from_bits(tf.arg3() as u32).unwrap())
+        }
+        SYSCALL_PIPE =>{
+            sys_pipe(tf.arg0(),tf.arg1())
         }
         SYSCALL_SENDFILE => {
             sys_sendfile(tf.arg0() as isize,tf.arg1() as isize,tf.arg2() as *const usize,tf.arg3())
@@ -66,6 +70,38 @@ pub fn syscall_fs_entry(tf:&mut TrapFrame, syscall_id:usize){
         }
     };
     tf.ret(ret as usize);
+}
+
+fn sys_pipe(pipe :usize,flags:usize)->isize{
+    let (read,write) = DFile::new_pipe();
+    let read = Arc::new(read);
+    let write= Arc::new(write);
+    let running = get_running();
+    let mut tsk = running.lock_irq().unwrap();
+    let mut readfd = 0usize;
+    let mut writefd = 0usize;
+    let mut ret = 0isize;
+    match tsk.alloc_opened(read){
+        None => {
+            ret = -1;
+        }
+        Some(fdr) => {
+            readfd = fdr;
+            match tsk.alloc_opened(write) {
+                None => {
+                    tsk.clear_opened(readfd);
+                    ret = -1;
+                }
+                Some(fdw) => {
+                    writefd = fdw;
+                }
+            }
+        }
+    }
+    unsafe { Vaddr(pipe).write_single(readfd as u32).unwrap() }
+    unsafe { Vaddr(pipe+size_of::<u32>()).write_single(readfd as u32).unwrap() }
+    trace_sync!("sys_pipe: pipe[2]:{:#X},flags:{:b},ret:{}",pipe,flags,ret);
+    ret
 }
 
 fn sys_fcntl(fd:usize,cmd:u32,arg:usize)->isize{

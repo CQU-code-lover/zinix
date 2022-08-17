@@ -21,7 +21,7 @@ lazy_static!{
 lazy_static!{
     static ref GLOBALFATFS:GlobalFatfs<SDCardDev> = GlobalFatfs{
         inner: Arc::new(SpinLock::new(fatfs::FileSystem::new(SDCardDev::new(),FsOptions::new()).unwrap()))
-    }
+    };
 }
 
 struct GlobalFatfs<T:BlockReadWrite>{

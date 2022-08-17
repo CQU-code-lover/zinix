@@ -5,13 +5,16 @@ use crate::mm::addr::{Addr, Vaddr};
 use crate::mm::vma::{MmapFlags, MmapProt, VMA};
 use crate::pre::InnerAccess;
 use crate::{SpinLock, Task};
-use crate::task::info::Utsname;
+use crate::task::info::{CloneFlags, Utsname};
 use crate::trap::TrapFrame;
 use super::*;
 
 pub fn syscall_proc_entry(tf:&mut TrapFrame, syscall_id:usize) {
     let ret:isize = match syscall_id {
         // todo getppid?
+        SYSCALL_CLONE=>{
+            -1
+        }
         SYSCALL_UNAME=>{
             sys_unmae(tf.arg0())
         }
@@ -39,11 +42,30 @@ pub fn syscall_proc_entry(tf:&mut TrapFrame, syscall_id:usize) {
             trace_sync!("sys_getcwd:buf_addr:{:#X},len:{},ret:{}",tf.arg0(),tf.arg1(),ret);
             ret
         }
+        SYSCALL_SET_TID_ADDRESS=>{
+            sys_set_tid_address(tf.arg0())
+        }
         _ => {
             panic!("fs syscall {} not impl",syscall_id);
         }
     };
     tf.ret(ret as usize);
+}
+
+fn sys_set_tid_address(tidptr:usize)->isize {
+    let running = get_running();
+    let tsk = running.lock_irq().unwrap();
+    tsk.clear_child_tid = tidptr;
+    tsk.get_tid() as isize
+}
+
+fn sys_clone(flags: usize, stack_ptr: usize, ptid: usize, ctid: usize, newtls: usize)->isize{
+    let clone_flags = unsafe {CloneFlags::from_bits_unchecked(flags)};
+    if clone_flags.contains(CloneFlags::CLONE_VM) || clone_flags.contains(CloneFlags::CLONE_THREAD) {
+        todo!()
+    }
+
+    -1
 }
 
 fn sys_getcwd(buf:usize,len:usize)->isize{
@@ -90,7 +112,7 @@ fn sys_mmap(va:usize,len:usize,prot:MmapProt,flags:MmapFlags,fd:usize,offset:usi
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
     let fd_open_ret = tsk.get_opened(fd);
-    let mm = tsk.mm.as_mut().unwrap();
+    let mut mm = tsk.mm.as_mut().unwrap().lock_irq().unwrap();
     if flags.contains(MmapFlags::MAP_ANONYMOUS) {
         let anon_mmap_ret = mm.alloc_mmap_anon(vaddr,len,flags,prot);
         return match anon_mmap_ret {
@@ -147,7 +169,7 @@ fn sys_mmap(va:usize,len:usize,prot:MmapProt,flags:MmapFlags,fd:usize,offset:usi
 fn sys_brk(brk:usize)->isize{
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
-    let mm = tsk.mm.as_mut().unwrap();
+    let mut mm = tsk.mm.as_mut().unwrap().lock_irq().unwrap();
     let mut ret:isize = 0;
     if brk==0{
         ret = mm.get_brk().get_inner() as isize;

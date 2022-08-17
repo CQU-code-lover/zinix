@@ -7,8 +7,7 @@ use core::cmp::min;
 use core::mem::size_of;
 use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use fatfs::error;
-use crate::{error_sync, info_sync, println, trace_sync};
-use crate::fs::dfile::OldDFile;
+use crate::{error_sync, info_sync, println, trace_sync, warn_sync};
 use crate::mm::addr::Vaddr;
 use crate::sbi::shutdown;
 use crate::syscall::sys_fs::syscall_fs_entry;
@@ -86,7 +85,7 @@ const SYSCALL_CLEAR: usize = 502;
 
 pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
     let syscall_id = trap_frame.x17;
-    trace_sync!("[syscall:{}]",syscall_id);
+    warn_sync!("[syscall:{}]",syscall_id);
     match syscall_id {
         // todo signal
         SYSCALL_SIGACTION => {
@@ -100,9 +99,6 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
             trap_frame.ok();
             exit_self();
         }
-        SYSCALL_SET_TID_ADDRESS => {
-            trap_frame.ok();
-        }
         SYSCALL_EXIT_GRUOP =>{
             trap_frame.ok();
         }
@@ -115,10 +111,12 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
             trap_frame.ret(0);
         }
         SYSCALL_OPENAT|SYSCALL_SENDFILE|SYSCALL_WRITEV|SYSCALL_WRITE|SYSCALL_READ|
-        SYSCALL_DUP|SYSCALL_DUP3|SYSCALL_CLOSE|SYSCALL_NEW_FSTATAT|SYSCALL_FCNTL => {
+        SYSCALL_DUP|SYSCALL_DUP3|SYSCALL_CLOSE|SYSCALL_NEW_FSTATAT|SYSCALL_FCNTL|
+        SYSCALL_PIPE=> {
             syscall_fs_entry(trap_frame,syscall_id);
         }
-        SYSCALL_BRK|SYSCALL_MMAP|SYSCALL_GETPID|SYSCALL_GETPPID|SYSCALL_UNAME|SYSCALL_GETCWD => {
+        SYSCALL_BRK|SYSCALL_MMAP|SYSCALL_GETPID|SYSCALL_GETPPID|SYSCALL_UNAME|SYSCALL_GETCWD|
+        SYSCALL_CLONE|SYSCALL_SET_TID_ADDRESS=> {
             syscall_proc_entry(trap_frame,syscall_id);
         }
         _ => {

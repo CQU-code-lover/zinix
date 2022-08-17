@@ -6,30 +6,15 @@ use crate::{print, println, SpinLock};
 use crate::consts::DIRECT_MAP_START;
 use crate::fs::dfile::DFILE_TYPE::*;
 use crate::fs::{DirAlias, FileAlias, get_dentry_from_dir};
+use crate::fs::dfile::DFileClass::ClassPipe;
 use crate::fs::fat::{BlkStorage, get_fatfs};
 use crate::fs::fcntl::OpenFlags;
 use crate::fs::inode::{Inode};
+use crate::fs::pipe::Pipe;
 use crate::io::virtio::VirtioDev;
 use crate::task::info::{NewStat, S_IFDIR, S_IFREG, S_IRWXG, S_IRWXO, S_IRWXU};
 use crate::task::task::get_running;
 use crate::utils::{date2second, datetime2second};
-
-lazy_static!{
-    static ref STDIN:Arc<OldDFile> = Arc::new(OldDFile::new_io(DFTYPE_STDIN));
-    static ref STDOUT:Arc<OldDFile> = Arc::new(OldDFile::new_io(DFTYPE_STDOUT));
-}
-
-pub fn get_stdout()->Arc<OldDFile>{
-    STDOUT.clone()
-}
-
-pub fn get_stdin()->Arc<OldDFile>{
-    STDIN.clone()
-}
-
-pub fn get_stderr()->Arc<OldDFile>{
-    STDOUT.clone()
-}
 
 pub enum DFILE_TYPE{
     DFTYPE_STDIN,
@@ -75,110 +60,6 @@ impl<'a> DirEntryWrapper<'a> {
     }
     pub fn to_file(self)->FileAlias<'a>{
         self.file.unwrap()
-    }
-}
-
-pub struct OldDFile {
-    pub inner:SpinLock<OldDFMutInner>
-}
-
-impl OldDFile {
-    pub fn new_io(dftype:DFILE_TYPE) ->Self{
-        Self{
-            inner: SpinLock::new(OldDFMutInner::new(dftype, String::new()))
-        }
-    }
-    pub fn new_file(path:String)->Self{
-        Self{
-            inner: SpinLock::new(OldDFMutInner::new(DFTYPE_FILE, path))
-        }
-    }
-    pub fn new_dir(path:String)->Self{
-        Self{
-            inner: SpinLock::new(OldDFMutInner::new(DFTYPE_DIR, path))
-        }
-    }
-    pub fn new_pipe()->Self{
-        Self{
-            inner: SpinLock::new(OldDFMutInner::new(DFTYPE_PIPE, String::new()))
-        }
-    }
-}
-
-pub struct OldDFMutInner {
-    dftype:DFILE_TYPE,
-    path:String,
-    pos:usize,
-}
-
-impl OldDFMutInner {
-    pub fn new(dftype:DFILE_TYPE,path:String)->Self{
-        Self{
-            dftype,
-            path,
-            pos:0
-        }
-    }
-    pub fn write(&mut self,buf:&[u8])->usize{
-        match self.dftype {
-            DFILE_TYPE::DFTYPE_STDIN => {0}
-            DFILE_TYPE::DFTYPE_STDOUT => {
-                print!("{}",String::from_utf8_lossy(buf));
-                buf.len()
-            }
-            DFILE_TYPE::DFTYPE_FILE => {
-                let fs = get_fatfs();
-                let lock = fs.lock_irq().unwrap();
-                let running = get_running();
-                let tsk = running.lock_irq().unwrap();
-                let wrapper = get_dentry_from_dir(lock.root_dir(),tsk.pwd_ref());
-                match wrapper {
-                    None => {
-                        return 0;
-                    }
-                    Some(v) => {
-                        let s= v.to_file().write(buf).unwrap();
-                        self.pos += s;
-                        return s;
-                    }
-                }
-            }
-            _ => {
-                todo!()
-            }
-        }
-    }
-    pub fn read(&mut self, buf: &mut [u8]) ->usize{
-        match self.dftype {
-            DFILE_TYPE::DFTYPE_STDIN => {
-                todo!();
-                0
-            }
-            DFILE_TYPE::DFTYPE_STDOUT => {0}
-            DFILE_TYPE::DFTYPE_FILE => {
-                let fs = get_fatfs();
-                let lock = fs.lock_irq().unwrap();
-                let running = get_running();
-                let tsk = running.lock_irq().unwrap();
-                let wrapper = get_dentry_from_dir(lock.root_dir(),tsk.pwd_ref());
-                match wrapper {
-                    None => {
-                        return 0;
-                    }
-                    Some(v) => {
-                        let s= v.to_file().read(buf).unwrap();
-                        self.pos += s;
-                        return s;
-                    }
-                }
-            }
-            _ => {
-                panic!("Dftype not found");
-            }
-        }
-    }
-    pub fn seek(&mut self,seek:SeekFrom){
-
     }
 }
 
@@ -229,6 +110,7 @@ impl Terminal {
 pub enum DFileClass{
     ClassInode(Arc<Inode>),
     ClassTerminal(Terminal),
+    ClassPipe(Arc<Pipe>),
 }
 
 pub struct DFileMutInner{
@@ -277,8 +159,8 @@ impl DFileMutInner {
             DFileClass::ClassTerminal(t) => {
                 Ok(t.read(buf))
             }
-            _ => {
-                todo!()
+            DFileClass::ClassPipe(p) => {
+                p.read_exact(buf)
             }
         }
     }
@@ -300,8 +182,8 @@ impl DFileMutInner {
             DFileClass::ClassTerminal(t) => {
                 Ok(t.write(buf))
             }
-            _=>{
-                todo!()
+            DFileClass::ClassPipe(p)=>{
+                p.write_exact(buf)
             }
         }
     }
@@ -395,6 +277,10 @@ impl DFileMutInner {
             DFileClass::ClassTerminal(_) => {
                 Ok(0)
             }
+            DFileClass::ClassPipe(_) =>{
+                // not support seek pipe
+                todo!()
+            }
         }
     }
 }
@@ -415,6 +301,29 @@ impl DFile {
     pub fn clone_inode(&self)->Option<Arc<Inode>>{
         self.inner.lock_irq().unwrap().clone_inode()
     }
+    // return (read_end,write_end)
+    pub fn new_pipe()->(Self,Self){
+        let p = Arc::new(Pipe::new());
+        p.inc_write();
+        let read = Self{
+            inner: SpinLock::new(DFileMutInner{
+                class: ClassPipe(p.clone()),
+                pos: 0,
+                open_flags: OpenFlags::O_RDONLY,
+                cloexec: false
+            })
+        };
+        let write = Self{
+            inner: SpinLock::new(DFileMutInner{
+                class: ClassPipe(p.clone()),
+                pos: 0,
+                open_flags: OpenFlags::O_WRONLY,
+                cloexec: false
+            })
+        };
+        (read,write)
+    }
+
     pub fn new_stdin() -> Self {
         Self {
             inner: SpinLock::new(DFileMutInner {
@@ -469,7 +378,7 @@ impl DFile {
                     }
                 }
             }
-            DFileClass::ClassTerminal(_) => {
+            _ => {
                 false
             }
         }
@@ -506,6 +415,9 @@ impl DFile {
             DFileClass::ClassTerminal(_) => {
                 None
             }
+            _ => {
+                None
+            }
         }
     }
     pub fn open_path(&self, path: &str, open_flags: OpenFlags) -> Option<Self> {
@@ -525,6 +437,9 @@ impl DFile {
                 })
             }
             DFileClass::ClassTerminal(_) => {
+                None
+            }
+            _ => {
                 None
             }
         }
@@ -582,5 +497,26 @@ impl DFile {
             }
         }
         Ok(())
+    }
+    pub fn readable(&self)->bool{
+        self.inner.lock_irq().unwrap().readable()
+    }
+    pub fn writeable(&self)->bool{
+        self.inner.lock_irq().unwrap().writeable()
+    }
+}
+
+impl Drop for DFile {
+    fn drop(&mut self) {
+        //主要针对pipe
+        let inner = self.inner.lock_irq().unwrap();
+        match &inner.class {
+            DFileClass::ClassPipe(p) => {
+                if inner.writeable() {
+                    p.dec_write();
+                }
+            }
+            _=>{}
+        }
     }
 }

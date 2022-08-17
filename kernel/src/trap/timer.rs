@@ -44,6 +44,6 @@ pub fn timer_startup(){
 pub fn timer_entry(trap_frame:&mut TrapFrame){
     set_next_trigger();
     if tic() {
-        scheduler();
+        scheduler(None);
     }
 }

@@ -17,11 +17,11 @@ use crate::mm::pagetable::PageTable;
 use crate::sbi::shutdown;
 use crate::task::task::{get_running, set_running, Task, TaskContext, TaskStatus};
 use crate::task::task::TaskStatus::TaskZombie;
+use crate::trap::TrapFrame;
 
 pub(crate) mod task;
 pub(crate) mod stack;
 pub(crate) mod info;
-
 
 extern "C" {
     fn switch_context(cur: *const TaskContext, next: *const TaskContext);
@@ -53,14 +53,14 @@ pub fn add_task(task: Arc<SpinLock<Task>>) {
 pub fn exit_self(){
     let this_task = get_running();
     this_task.lock_irq().unwrap().set_status(TaskZombie);
-    scheduler();
+    scheduler(None);
 }
 
 pub fn get_task() -> Arc<SpinLock<Task>> {
     running_list.lock().unwrap().pop_front().unwrap()
 }
 
-pub fn scheduler() {
+pub fn scheduler(sleep_list_assign:Option<&SpinLock<LinkedList<Arc<SpinLock<Task>>>>>) {
     // info_sync!("schedule");
     let mut rs = running_list.lock().unwrap();
     // bug raise
@@ -85,7 +85,11 @@ pub fn scheduler() {
             rs.push_back(current.clone());
         }
         TaskStatus::TaskSleeping => {
-            sleep_list.lock_irq().unwrap().push_back(current.clone());
+            if sleep_list_assign.is_some(){
+                sleep_list_assign.unwrap().lock_irq().unwrap().push_back(current.clone());
+            } else {
+                sleep_list.lock_irq().unwrap().push_back(current.clone());
+            }
         }
         TaskStatus::TaskZombie => {
             exit_list.lock_irq().unwrap().push_back(current.clone());
@@ -98,6 +102,10 @@ pub fn scheduler() {
     let next_locked = next_running.lock_irq().unwrap();
     if next_locked.is_user() {
         // install pagetable
+        // next_locked.context.sp
+        // let ttff = unsafe {&*(next_locked.context.sp as *const TrapFrame)};
+        // println!("{:?}",ttff);
+        // shutdown();
         unsafe { next_locked.install_pagetable(); }
     }
     drop(next_locked);

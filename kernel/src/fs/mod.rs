@@ -14,6 +14,7 @@ pub mod inode;
 pub mod superblock;
 pub mod dfile;
 pub mod fcntl;
+pub mod pipe;
 
 pub fn init_fs(){
     fat_init();
@@ -30,7 +31,7 @@ unsafe impl Sync for UnsafeFatfs {}
 #[cfg(feature = "qemu")]
 pub type FatDev = VirtioDev;
 #[cfg(feature = "k210")]
-pub type FATDev = SDCardDev;
+pub type FatDev = SDCardDev;
 
 pub type FatFs = FileSystem<BlkStorage<FatDev>,DefaultTimeProvider,LossyOemCpConverter>;
 
@@ -117,5 +118,5 @@ pub fn get_dentry_from_dir<'a,'b>(in_dir:DirAlias<'a>,path:&'b str)->Option<DirE
 }
 
 pub unsafe fn get_unsafe_global_fatfs() ->&'static FatFs{
-    return &UNSAFE_FAT_FS.0
+    &UNSAFE_FAT_FS.0
 }

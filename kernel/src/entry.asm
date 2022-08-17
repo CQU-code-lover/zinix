@@ -151,7 +151,8 @@ boot_stack_top:
     .global boot_pagetable
 boot_pagetable:
     #.quad (0 << 10) | 0xcf # VRWXAD
-    .zero 8 * 2
+    .zero 8 * 1
+    .quad (0x40000 << 10) | 0xcf # VRWXAD
     .quad (0x80000 << 10) | 0xcf # VRWXAD
     .zero 8 * 351
     .quad (0x80000 << 10) | 0xcf # VRWXAD

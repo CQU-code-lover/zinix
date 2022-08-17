@@ -170,12 +170,14 @@ def k210_pre_build(self):
 def k210_build(self):
     print("Build Platform:"+self.name)
     self.pre_build(self)
-    if is_debug():
-        # return os.system("cargo build --target targets/riscv64.json")==0
-        return os.system("cargo build --no-default-features --features \"k210,debug\"")==0
+    build_str = "cargo build --no-default-features"
+    if not is_debug():
+        build_str += " --release"
+    if TRACE:
+        build_str += " --features k210,debug"
     else:
-        return os.system("cargo build --release  --no-default-features --features k210,debug")==0
-
+        build_str += " --features k210"
+    return os.system(build_str)==0
 def k210_after_build(self):
     if not self.build(self):
         return False

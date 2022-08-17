@@ -21,7 +21,7 @@ use crate::task::stack::Stack;
 use riscv::register::*;
 use crate::mm::aux::*;
 use xmas_elf::symbol_table::Visibility::Default;
-use crate::fs::dfile::{OldDFile, get_stderr, get_stdin, get_stdout, DFile};
+use crate::fs::dfile::{ DFile};
 use crate::fs::dfile::DFILE_TYPE::DFTYPE_STDIN;
 use crate::fs::fat::get_fatfs;
 use crate::fs::fcntl::OpenFlags;
@@ -90,11 +90,12 @@ pub fn RUNNING_TASK()->Arc<SpinLock<Task>>{
     get_running()
 }
 
+#[derive(Clone)]
 #[repr(C)]
 pub struct TaskContext {
     ra: usize,
     //reserved by callee
-    sp: usize,
+    pub sp: usize,
     s0: usize,
     s1: usize,
     s2: usize,
@@ -109,7 +110,7 @@ pub struct TaskContext {
     s11: usize,
     sscratch: usize,
     // point to stack
-    sstatus: usize,
+    pub sstatus: usize,
 }
 
 impl TaskContext {
@@ -141,13 +142,15 @@ pub struct Task {
     tid: usize,
     tgid: usize,
     kernel_stack: Stack,
-    context: TaskContext,
+    pub context: TaskContext,
     parent: Option<Weak<SpinLock<Task>>>,
     status: TaskStatus,
-    pub mm: Option<MmStruct>,
+    pub mm: Option<Arc<SpinLock<MmStruct>>>,
     opened: Vec<Option<Arc<DFile>>>,
     pwd:String,
     pub pwd_dfile:Arc<DFile>,
+    pub set_child_tid: usize,
+    pub clear_child_tid: usize,
 }
 
 fn get_init_pwd()->String {
@@ -180,7 +183,9 @@ impl Task {
             mm: None,
             opened: vec![None;MAX_OPENED],
             pwd:get_init_pwd(),
-            pwd_dfile:DFile::get_root()
+            pwd_dfile:DFile::get_root(),
+            set_child_tid: 0,
+            clear_child_tid: 0
         };
         sscratch::write(0);
         unsafe {
@@ -188,8 +193,12 @@ impl Task {
             sstatus::set_sum();
         }
         let t = Arc::new(SpinLock::new(tsk));
+        info_sync!("1");
         set_running(t.clone());
         add_task(t);
+    }
+    pub fn get_tid(&self)->usize{
+        self.tid
     }
     pub fn get_tgid(&self)->usize{
         self.tgid
@@ -282,7 +291,9 @@ impl Task {
             mm: None,
             opened:vec![None;MAX_OPENED],
             pwd:get_init_pwd(),
-            pwd_dfile: DFile::get_root()
+            pwd_dfile: DFile::get_root(),
+            set_child_tid: 0,
+            clear_child_tid: 0
         };
         tsk.context.ra = kern_trap_ret as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
@@ -324,26 +335,36 @@ impl Task {
             context: TaskContext::new(),
             parent: None,
             status: TaskStatus::TaskRunning,
-            mm: Some(mm_struct),
+            mm: Some(Arc::new(SpinLock::new(mm_struct))),
             opened:vec![None;MAX_OPENED],
             pwd:get_init_pwd(),
-            pwd_dfile: DFile::get_root()
+            pwd_dfile: DFile::get_root(),
+            set_child_tid: 0,
+            clear_child_tid: 0
         };
         tsk.opened[0] = Some(Arc::new(DFile::new_stdin()));
         tsk.opened[1] = Some(Arc::new(DFile::new_stdout()));
         tsk.opened[2] = Some(Arc::new(DFile::new_stderr()));
         tsk.context.ra = user_trap_ret as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
-        tsk.context.sstatus = r_sstatus()|SSTATUS_SPIE|SSTATUS_SIE&(!SSTATUS_SPP);
+        tsk.context.sstatus = r_sstatus()|SSTATUS_SPIE|SSTATUS_SIE|SSTATUS_SPP;
+
         let mut tf = TrapFrame::new_empty();
         tf.sstatus = r_sstatus()|SSTATUS_SPIE&(!SSTATUS_SPP);
+        // tf.sstatus |= (1<<18);
+        // println!("{:#X}",r_sstatus());
+        // println!("{:#X}",SSTATUS_SPP);
+        // println!("{:#X}",!SSTATUS_SPP);
+        // println!("{:#X}",tf.sstatus);
+        // println!("{}",tf.sstatus&SSTATUS_SPP);
         tf.sepc = entry_point;
         tf.x2 = tsk.context.sp;
 
         // install user task pgt to access user stack
         // tsk.mm.as_ref().unwrap().install_pagetable();
         // let walk_ret = tsk.mm.as_ref().unwrap().pagetable.walk(0xFFFFFEE);
-        let stack_vma = match tsk.mm.as_mut().unwrap().find_vma(Vaddr(USER_STACK_MAX_ADDR-PAGE_SIZE)) {
+        let mut mm = tsk.mm.as_mut().unwrap().lock_irq().unwrap();
+        let stack_vma = match mm.find_vma(Vaddr(USER_STACK_MAX_ADDR-PAGE_SIZE)) {
             None => {
                 return None;
             }
@@ -479,10 +500,7 @@ impl Task {
         tf.x11 = argv_base;
         tf.x12 = envp_base;
         tf.x13 = auxv_base;
-
         unsafe { tf.write_to(tsk.context.sp); }
-
-
         // get_kernel_pagetable().lock_irq().unwrap().install();
         // let v:u32 =
         //     unsafe {
@@ -491,6 +509,7 @@ impl Task {
         // println!("{:#X}",v);
         // shutdown();
         info_sync!("add user task OK");
+        drop(mm);
         Some(Arc::new(SpinLock::new(tsk)))
     }
     pub unsafe fn create_user_task_and_run(path:&str,args:Vec<String>)->Result<(),()>{
@@ -522,7 +541,25 @@ impl Task {
         }
     }
     pub unsafe fn install_pagetable(&self) {
-        self.mm.as_ref().unwrap().install_pagetable();
+        self.mm.as_ref().unwrap().lock_irq().unwrap().install_pagetable();
+    }
+    // fork一个cow的新进程
+    pub fn vfork_step_one(&self)->Self{
+        let new_tid = generate_tid();
+        Self{
+            tid: new_tid,
+            tgid: new_tid,
+            kernel_stack: Stack::new_by_copy_from(&self.kernel_stack),
+            context: self.context.clone(),
+            parent: None,
+            status: TaskStatus::TaskRunning,
+            mm: None,
+            opened: vec![],
+            pwd: self.pwd.clone(),
+            pwd_dfile: Arc::new(self.pwd_dfile.clone()),
+            set_child_tid: 0,
+            clear_child_tid: 0
+        }
     }
 }
 

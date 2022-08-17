@@ -6,7 +6,7 @@ use core::borrow::BorrowMut;
 use fatfs::{Error, Read, Seek, SeekFrom, Write};
 use crate::fs::{DirAlias, DirEntryAlias, FileAlias, get_dentry_from_dir, get_sub_dentry, get_unsafe_global_fatfs};
 use crate::fs::dfile::DirEntryWrapper;
-use crate::SpinLock;
+use crate::{info_sync, SpinLock};
 
 lazy_static!{
     static ref root_inode:Arc<Inode> = Inode::_create_root();
@@ -50,7 +50,8 @@ impl InodeMutInner {
 
 impl Inode {
     pub fn get_root()->Arc<Inode>{
-        root_inode.clone()
+        let ret = root_inode.clone();
+        ret
     }
     fn _create_root()->Arc<Self>{
         let mut s =unsafe {

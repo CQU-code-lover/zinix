@@ -184,7 +184,7 @@ impl</*'a,*/ X: SPI> SDCard</*'a,*/ X> {
     }
 
     fn HIGH_SPEED_ENABLE(&self) {
-        self.spi.set_clk_rate(10000000);//10000000
+        self.spi.set_clk_rate(8000000);//10000000
     }
 
     fn lowlevel_init(&self) {
@@ -520,7 +520,6 @@ impl</*'a,*/ X: SPI> SDCard</*'a,*/ X> {
         self.write_data(&[0xff; 10]);
         /*------------Put SD in SPI mode--------------*/
         /* SD initialized and set to SPI mode properly */
-        trace!("sd init :send dummy byte 0xFF OK");
 
         /* Send software reset */
         self.send_cmd(CMD::CMD0, 0, 0x95);
@@ -529,7 +528,6 @@ impl</*'a,*/ X: SPI> SDCard</*'a,*/ X> {
         if result != 0x01 {
             return Err(InitError::CMDFailed(CMD::CMD0, result));
         }
-        trace!("sd init :send software reset ok");
 
         /* Check voltage range */
         self.send_cmd(CMD::CMD8, 0x01AA, 0x87);
@@ -541,8 +539,6 @@ impl</*'a,*/ X: SPI> SDCard</*'a,*/ X> {
         if result != 0x01 {
             return Err(InitError::CMDFailed(CMD::CMD8, result));
         }
-        trace!("sd init :Check voltage range ok");
-
         let mut index = 255;
         while index != 0 {
             /* <ACMD> */
@@ -583,13 +579,7 @@ impl</*'a,*/ X: SPI> SDCard</*'a,*/ X> {
         if (frame[0] & 0x40) == 0 {
             return Err(InitError::CardCapacityStatusNotSet(frame));
         }
-        let mut buf = [0u8;512];
-        self.read_sector(&mut buf[..],0);
-        trace!("read sector ok");
-        // self.HIGH_SPEED_ENABLE();
-        let mut buf = [0u8;512];
-        self.read_sector(&mut buf[..],0);
-        trace!("read sector ok");
+        self.HIGH_SPEED_ENABLE();
         self.get_cardinfo()
             .map_err(|_| InitError::CannotGetCardInfo)
     }
@@ -731,12 +721,15 @@ lazy_static! {
 fn init_sdcard() -> SDCard<SPIImpl<SPI0>> {
     // wait previous output
     usleep(100000);
+
     let peripherals = unsafe { Peripherals::steal() };
+
     sysctl::pll_set_freq(sysctl::pll::PLL0, 800_000_000).unwrap();
     sysctl::pll_set_freq(sysctl::pll::PLL1, 300_000_000).unwrap();
     sysctl::pll_set_freq(sysctl::pll::PLL2, 45_158_400).unwrap();
     let clocks = k210_hal::clock::Clocks::new();
     peripherals.UARTHS.configure(115_200.bps(), &clocks);
+
     io_init();
 
     let spi = peripherals.SPI0.constrain();

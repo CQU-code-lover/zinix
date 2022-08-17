@@ -1,3 +1,23 @@
+
+
+bitflags!{
+    pub struct CloneFlags: usize{
+        const SIGCHLD = 17;
+        const CLONE_VM = 0x00000100;
+        const CLONE_FS      =  0x00000200;
+        const CLONE_FILES   =  0x00000400;
+        const CLONE_SIGHAND =  0x00000800;
+        const CLONE_PID    =  0x00001000;
+        const CLONE_PTRACE  =  0x00002000;
+        const CLONE_VFORK  = 0x00004000;
+        const CLONE_PARENT =  0x00008000;
+        const CLONE_THREAD  = 0x00010000;
+        const CLONE_NEWNS =  0x00020000;
+        const CLONE_CHILD_CLEARTID = 0x00200000;
+        const CLONE_CHILD_SETTID = 0x01000000;
+    }
+}
+
 /* fcntl */
 /* cmd */
 pub const F_DUPFD: u32 = 0; /*  dup the fd using the lowest-numbered

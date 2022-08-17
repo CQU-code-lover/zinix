@@ -1,4 +1,5 @@
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use core::arch::asm;
 use core::ptr::slice_from_raw_parts;
@@ -8,11 +9,12 @@ use xmas_elf::ElfFile;
 use crate::io::virtio::{virtio_test, VirtioDev};
 use crate::mm::addr::{OldAddr, PageAlign, Vaddr};
 use crate::mm::{alloc_pages, get_kernel_pagetable, mm_test};
-use crate::{info_sync, println, Task};
+use crate::{info_sync, println, SpinLock, Task};
 use crate::asm::{enable_irq, r_sstatus, SSTATUS_SIE};
 use crate::fs::dfile::DFileClass::ClassInode;
 use crate::fs::fat::get_fatfs;
 use crate::fs::inode::Inode;
+use crate::fs::pipe::Pipe;
 use crate::io::BlockRead;
 use crate::io::sdcard::{new_sdcard, SDCardDev};
 use crate::mm::kmap::KmapToken;
@@ -31,7 +33,56 @@ unsafe fn test_kmap(){
     shutdown()
 }
 
+struct PipeWrapper(Arc<Pipe>);
+
+impl Clone for PipeWrapper {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+unsafe impl Sync for PipeWrapper {}
+
+lazy_static!{
+    static ref g_pipe:PipeWrapper = PipeWrapper(Arc::new(Pipe::new()));
+}
+
+fn reader(){
+    info_sync!("start reader!");
+    let mut pipe = g_pipe.clone();
+    pipe.0.inc_write();
+    let mut buf = [0u8;20];
+    pipe.0.read_exact(&mut buf);
+    println!("{:?}",buf);
+    loop {
+
+    }
+}
+
+fn writer(){
+    info_sync!("start writer!");
+    let pipe = g_pipe.clone();
+    let buf = [1u8;19];
+    pipe.0.write_exact(&buf);
+    println!("{:?}",buf);
+    pipe.0.dec_write();
+    loop {
+
+    }
+}
+
+fn test_pipe(){
+    let pipe = Pipe::new();
+    Task::create_kern_task_and_run(reader);
+    Task::create_kern_task_and_run(writer);
+
+    loop {
+
+    }
+}
+
 pub unsafe fn do_test(){
+    // test_pipe();
     // mm_test();
     // test_kmap();
     // Task::create_user_task_and_run("m.o",vec![]);

@@ -7,6 +7,7 @@ use core::ptr::{addr_of, NonNull, null};
 
 use buddy_system_allocator::LockedHeap;
 use log::{error, info};
+use riscv::asm::sfence_vma_all;
 use riscv::register::fcsr::Flags;
 
 use buddy::BuddyAllocator;
@@ -21,7 +22,7 @@ use crate::mm::bitmap::bitmap_test;
 use crate::mm::mm::MmStruct;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{create_kernel_mm, PTE, PTEFlags};
-use crate::pre::InnerAccess;
+use crate::pre::{InnerAccess, ReadWriteSingleNoOff};
 use crate::sbi::shutdown;
 use crate::sync::SpinLockGuard;
 use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
@@ -88,15 +89,28 @@ fn buddy_init(start_addr: Vaddr, end_addr: Vaddr){
     BUDDY_ALLOCATOR.lock().unwrap().init(start_addr,end_addr);
 }
 
-fn hardware_address_map_init(){
+fn k210_remap(pgt:Arc<PageTable>){
+    pgt._force_map_one(0x38000000,0x38000000,0xcf);
+    pgt._force_map_one(0x38001000,0x38001000,0xcf);
+}
+
+fn hardware_remapping(){
     let pgt = get_kernel_pagetable();
     let flags = PTEFlags::V.bits()| PTEFlags::R.bits()| PTEFlags::W.bits()| PTEFlags::X.bits();
     #[cfg(feature = "qemu")]
     {
+        // 清空0x40000000映射部分 这部分是k210专用
+        let v:usize =unsafe{(pgt._get_root_page_vaddr()+8).read_single().unwrap()};
+        unsafe{(pgt._get_root_page_vaddr()+8).write_single(0).unwrap();}
         for i in 0x10001..0x10300{
            pgt._force_map_one(0+PAGE_SIZE*i+DEV_REMAP_START, 0+PAGE_SIZE*i, 0xcf);
         }
     }
+    #[cfg(feature = "k210")]
+    {
+        k210_remap(pgt);
+    }
+    unsafe { sfence_vma_all(); }
     info_sync!("remap hardware ok");
 }
 
@@ -125,7 +139,7 @@ pub fn mm_init(){
     e_addr = e_addr.floor();
     buddy_init(s_addr,e_addr);
     page_init(s_addr,e_addr);
-    hardware_address_map_init();
+    hardware_remapping();
 }
 
 pub fn alloc_pages(order:usize)->Option<Arc<Page>>{

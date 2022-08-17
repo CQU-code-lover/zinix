@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use crate::consts::{KERNEL_STACK_SIZE_ORDER, PAGE_SIZE, STACK_MAGIC};
+use crate::info_sync;
 use crate::mm::alloc_pages;
 use crate::mm::page::Page;
 use crate::pre::{InnerAccess, ReadWriteSingleOff};
@@ -24,6 +25,9 @@ impl Stack {
             }
         };
         s
+    }
+    pub fn new_by_copy_from(old:&Self)->Self{
+
     }
     pub unsafe fn _check_magic(&self)->bool{
         let mut magic:u64 = 0;

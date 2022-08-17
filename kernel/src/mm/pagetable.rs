@@ -19,7 +19,7 @@ use crate::mm::addr::{OldAddr, Paddr, PageAlign, PFN, Vaddr};
 use crate::mm::mm::{MmStruct, VmaCache};
 use crate::utils::order2pages;
 use crate::mm::page::Page;
-use crate::pre::InnerAccess;
+use crate::pre::{InnerAccess, ReadWriteSingleNoOff};
 use crate::utils::{addr_get_ppn0, addr_get_ppn1, addr_get_ppn2, get_usize_by_addr, set_usize_by_addr};
 
 extern "C" {
@@ -55,6 +55,7 @@ impl WalkRet {
 }
 
 impl PageTable {
+    // todo check
     pub fn new_user()->Self{
         let mut p = PageTable::default();
         // get_kernel_pagetable().walk(0xFFF0000);
@@ -65,6 +66,21 @@ impl PageTable {
                     ((root_addr + i) as *const u64).read_volatile()
                 );
             }
+        }
+        // k210需要清除0-0x40000000
+        // qemu需要清除0-0x80000000
+        unsafe {
+            p._get_root_page_vaddr().write_single(0usize);
+        }
+        #[cfg(feature = "qemu")]
+        unsafe {
+            (p._get_root_page_vaddr()+8).write_single(0usize);
+        }
+        #[cfg(feature = "k210")]
+        {
+            // k210需要单独映射一部分
+            p._force_map_one(0x38000000,0x38000000,0xcf);
+            p._force_map_one(0x38001000,0x38001000,0xcf);
         }
         p
     }

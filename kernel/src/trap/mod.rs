@@ -7,9 +7,10 @@ use core::mem::size_of;
 use log::debug;
 use riscv::register::{sie, sstatus, stvec, scause};
 use riscv::register::scause::{Exception, Interrupt, Scause, Trap};
+use riscv::register::sstatus::Sstatus;
 use riscv::register::stvec::TrapMode;
-use crate::{debug_sync, info_sync, println, warn_sync};
-use crate::asm::{disable_irq, enable_irq, r_satp, r_scause, r_stval};
+use crate::{debug_sync, info_sync, println, r_sstatus, trace_sync, warn_sync};
+use crate::asm::{disable_irq, enable_irq, r_satp, r_scause, r_stval, SSTATUS_SPP};
 use crate::consts::PHY_MEM_OFFSET;
 use crate::mm::{get_kernel_mm, get_kernel_pagetable};
 use crate::mm::addr::{Paddr, PageAlign, Vaddr};
@@ -156,7 +157,7 @@ impl TrapFrame {
 #[no_mangle]
 fn irq_handler(trap_frame:&mut TrapFrame){
     unsafe { RUNNING_TASK().lock_irq().unwrap().check_magic(); }
-    // debug!("IRQ\n{:?}",trap_frame);
+    // trace_sync!("IRQ\n{:?}",trap_frame);
     match scause::read().cause() {
         Trap::Interrupt(irq) => {
             match irq {
@@ -194,6 +195,9 @@ fn exc_handler(trap_frame:&mut TrapFrame){
     debug_sync!("EXC\n{:?}",trap_frame);
     debug_sync!("sstval:{:#X}",r_stval());
     debug_sync!("scause:{:#X}",r_scause());
+    let spp = r_sstatus()&SSTATUS_SPP;
+
+    debug_sync!("spp:{}",spp);
     unsafe { RUNNING_TASK().lock_irq().unwrap().check_magic(); }
     match scause::read().cause() {
         Trap::Exception(exc) => {
@@ -202,29 +206,31 @@ fn exc_handler(trap_frame:&mut TrapFrame){
                     Exception::InstructionMisaligned => {
                         todo!()
                     }
-                    Exception::InstructionFault => {
-                        todo!()
-                    }
                     Exception::IllegalInstruction => {
                         todo!()
                     }
                     Exception::Breakpoint => {
                         todo!()
                     }
-                    Exception::LoadFault => {
-                        todo!()
-                    }
                     Exception::StoreMisaligned => {
                         todo!()
                     }
-                    Exception::StoreFault => {
-                        todo!()
-                    }
                     Exception::UserEnvCall => {
+                        if r_sstatus()&SSTATUS_SPP!=0{
+                            panic!("11");
+                        }
                         syscall_entry(trap_frame);
                         trap_frame.sepc+=4;
+                        if r_sstatus()&SSTATUS_SPP!=0{
+                            panic!("22");
+                        }
+                        info_sync!("syscall");
                     }
-                    Exception::InstructionPageFault => {
+                    Exception::InstructionPageFault|Exception::InstructionFault => {
+                        if r_sstatus()&SSTATUS_SPP !=0{
+                            trap_frame.sstatus&(!SSTATUS_SPP);
+                            info_sync!("change spp");
+                        }
                         let vaddr = r_stval();
                         trap_page_fault_handler(Vaddr(vaddr));
                         // unsafe {
@@ -232,44 +238,30 @@ fn exc_handler(trap_frame:&mut TrapFrame){
                         //     let v = *(trap_frame.sepc as *const usize);
                         //     println!("ins = {:#X}", v);
                         // }
-                        return;
-                        let mut pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
-                        println!("{:#b}", pte.flags);
+                        // let mut pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
+                        // println!("{:#b}", pte.flags);
                         // pte.flags|=PTEFlags::A.bits();
                         // set_usize_by_addr(pte.get_point_paddr()+PHY_MEM_OFFSET,pte.into());
 
-                        pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
-                        println!("{:#b}", pte.flags);
+                        // pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
+                        // println!("{:#b}", pte.flags);
                     }
-                    Exception::LoadPageFault => {
+                    Exception::LoadPageFault|Exception::LoadFault|Exception::StoreFault|
+                    Exception::StorePageFault=> {
                         let vaddr = r_stval();
                         trap_page_fault_handler(Vaddr(vaddr));
-                        return;
-                        let running = get_running();
-                        let tsk = running.lock_irq().unwrap();
-                        if tsk.is_kern(){
-                            let mut mm = get_kernel_mm();
-                            let va = Vaddr(r_stval()).floor();
-                            let vma = mm.find_vma(va).unwrap();
-                            vma._do_alloc_one_page(va);
-                        } else {
-                            panic!("load pg fault");
-                        }
+                        // let running = get_running();
+                        // let tsk = running.lock_irq().unwrap();
+                        // if tsk.is_kern(){
+                        //     let mut mm = get_kernel_mm();
+                        //     let va = Vaddr(r_stval()).floor();
+                        //     let vma = mm.find_vma(va).unwrap();
+                        //     vma._do_alloc_one_page(va);
+                        // } else {
+                        //     panic!("load pg fault");
+                        // }
                         // let pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte();
                         // println!("{:#b}", pte.flags);
-                    }
-                    Exception::StorePageFault => {
-                        let vaddr = r_stval();
-                        trap_page_fault_handler(Vaddr(vaddr));
-                        return;
-                        // let vaddr = r_stval();
-                        // let pte  = if get_running().lock_irq().unwrap().mm.is_some() {
-                        //      get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte()
-                        // } else {
-                        //     get_kernel_pagetable().lock_irq().as_ref().unwrap().walk(vaddr).unwrap().get_pte()
-                        // };
-                        // println!("{:#b}", pte.flags);
-                        panic!("store pg fault");
                     }
                     Exception::Unknown => {
                         panic!("unrecognized exception");
@@ -279,6 +271,7 @@ fn exc_handler(trap_frame:&mut TrapFrame){
         }
         _ => panic!("exc bug")
     }
+    trace_sync!("exc handler ret user space");
     enable_irq(irq_state);
 }
 
@@ -326,7 +319,7 @@ fn trap_page_fault_handler(vaddr:Vaddr) ->bool{
             }
         }
     } else {
-        let mut m = tsk.mm.as_mut().unwrap();
+        let mut m = tsk.mm.as_mut().unwrap().lock_irq().unwrap();
         match m.find_vma(v){
             None => {
                 let p:Paddr = m.pagetable._get_root_page_vaddr().into();
