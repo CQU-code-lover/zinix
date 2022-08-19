@@ -16,9 +16,9 @@ use crate::mm::aux::{AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, A
 use crate::utils::order2pages;
 use crate::mm::page::Page;
 use crate::mm::pagetable::{PageTable, PTEFlags, WalkRet};
-use crate::mm::vma::{MmapFlags, MmapProt, VMA, VmFlags};
-use crate::pre::{ReadWriteOffUnsafe, ReadWriteSingleNoOff};
-use crate::println;
+use crate::mm::vma::{_vma_flags_2_pte_flags, MmapFlags, MmapProt, VMA, VmFlags};
+use crate::pre::{ReadWriteOffUnsafe, ReadWriteSingleNoOff, ShowRdWrEx};
+use crate::{println, SpinLock, warn_sync};
 use crate::sbi::shutdown;
 
 const VMA_CACHE_MAX:usize = 10;
@@ -29,7 +29,8 @@ pub struct MmStruct{
     pub pagetable:Arc<PageTable>,
     vmas: BTreeMap<Vaddr,VMA>,
     start_brk:Vaddr,
-    brk:Vaddr
+    brk:Vaddr,
+    pub cow_target:Option<Arc<SpinLock<MmStruct>>>
 }
 
 impl Debug for MmStruct {
@@ -47,25 +48,129 @@ pub struct VmaCache {
     vmas:LinkedList<Arc<VMA>>
 }
 
+#[cfg(not(feature = "copy_on_write"))]
+pub fn new_mm_by_old(old:Arc<SpinLock<MmStruct>>) ->MmStruct{
+    let mut old_locked = old.lock_irq().unwrap();
+    let new_pagetable = PageTable::new_user();
+    let mut new = MmStruct::new_empty_user_mm_by_pagetable(new_pagetable);
+    new.brk = old_locked.brk;
+    new.start_brk = old_locked.start_brk;
+    // copy vmas
+    for (vaddr,vma) in old_locked.vmas.range_mut(&Vaddr(USER_SPACE_START)..&Vaddr(USER_SPACE_END)){
+        let mut new_vma = VMA{
+            start_vaddr: vma.start_vaddr,
+            end_vaddr: vma.end_vaddr,
+            vm_flags: vma.vm_flags,
+            pages_tree: BTreeMap::new(),
+            pagetable: Some(new.pagetable.clone()),
+            file: vma.file.as_ref().map(|x|{x.clone()}),
+            file_off: vma.file_off,
+            file_in_vma_off: vma.file_in_vma_off,
+            file_len: vma.file_len,
+            phy_pgs_cnt: vma.phy_pgs_cnt,
+            cow_write_reserve_pgs: None
+        };
+        let vma_pgt = vma.pagetable.as_ref().unwrap();
+        for (vv, pg) in vma.pages_tree.iter() {
+            // change map flags
+            let new_pg = new_vma.__fast_alloc_one_page_and_get(vv.clone());
+            unsafe { new_pg.copy_one_page_data_from(pg.clone()); }
+        }
+        assert!(new.vmas.insert(vaddr.clone(),new_vma).is_none());
+    }
+    new
+}
+
+#[cfg(feature = "copy_on_write")]
+pub fn new_mm_by_old(old:Arc<SpinLock<MmStruct>>) ->MmStruct{
+    let mut old_locked = old.lock_irq().unwrap();
+    if old_locked.cow_target.is_some(){
+        // 正在cow其他mm
+        todo!()
+    }
+    let new_pagetable = old_locked.new_cow_pagetable();
+    let mut new = MmStruct::new_empty_user_mm_by_pagetable(new_pagetable);
+    new.cow_target = Some(old.clone());
+    new.brk = old_locked.brk;
+    new.start_brk = old_locked.start_brk;
+    // copy vmas
+    for (vaddr,vma) in old_locked.vmas.range_mut(&Vaddr(USER_SPACE_START)..&Vaddr(USER_SPACE_END)){
+        warn_sync!("{:?}",vma);
+        // writeable需要设置为不可write
+        if vma.writeable(){
+            vma.cow_write_reserve_pgs = Some(BTreeMap::new());
+            let vma_pgt = vma.pagetable.as_ref().unwrap();
+            for (vv,pg) in vma.pages_tree.iter(){
+                // change map flags
+                let new_flags = _vma_flags_2_pte_flags(vma.vm_flags&(!VmFlags::VM_WRITE));
+                vma_pgt.change_map_flags(vv.clone(),new_flags).unwrap();
+            }
+        }
+        let new_vma = VMA{
+            start_vaddr: vma.start_vaddr,
+            end_vaddr: vma.end_vaddr,
+            vm_flags: vma.vm_flags,
+            // 空tree map 不关联任何物理页
+            pages_tree: BTreeMap::new(),
+            pagetable: Some(new.pagetable.clone()),
+            file: vma.file.as_ref().map(|x|{x.clone()}),
+            file_off: vma.file_off,
+            file_in_vma_off: vma.file_in_vma_off,
+            file_len: vma.file_len,
+            phy_pgs_cnt: vma.phy_pgs_cnt,
+            cow_write_reserve_pgs: None
+        };
+        assert!(new.vmas.insert(vaddr.clone(),new_vma).is_none());
+    }
+    new
+}
+
 impl MmStruct {
+    // 创建cow使用的页表，所有的页表项都要重新分配，但是页使用共享映射并且去除write
+    fn new_cow_pagetable(&self)->PageTable{
+        let new_user = PageTable::new_user();
+        let old_pagetable = self.pagetable.clone();
+        // 只需要cow用户空间
+        for (vaddr,vma) in self.vmas.range(&Vaddr(USER_SPACE_START)..&Vaddr(USER_SPACE_END)) {
+            for (va,pg) in vma.pages_tree.iter() {
+                let pa = pg.get_paddr();
+                let new_flags = vma.vm_flags&(!VmFlags::VM_WRITE);
+                new_user.map_one_page(va.clone(),pa.clone(),_vma_flags_2_pte_flags(new_flags));
+            }
+        }
+        new_user
+    }
     pub fn new_kern_mm_by_pagetable(pagetable:PageTable)->Self{
-        MmStruct{
+        Self{
             is_kern: true,
             // vma_cache: VmaCache::new(),
             pagetable: Arc::new(pagetable),
             vmas: Default::default(),
             start_brk: Default::default(),
-            brk: Default::default()
+            brk: Default::default(),
+            cow_target:None
+        }
+    }
+    pub fn new_empty_user_mm_by_pagetable(pagetable:PageTable)->Self{
+        Self{
+            is_kern:false,
+            // vma_cache: VmaCache::new(),
+            pagetable: Arc::new(pagetable),
+            vmas: Default::default(),
+            start_brk: Default::default(),
+            brk: Default::default(),
+            cow_target: None
         }
     }
     pub fn new_empty_user_mm() ->Self{
-        MmStruct{
+        Self{
             is_kern:false,
             // vma_cache: VmaCache::new(),
             pagetable: Arc::new(PageTable::new_user()),
             vmas: Default::default(),
             start_brk: Default::default(),
-            brk: Default::default()
+            brk: Default::default(),
+            cow_target: None
         }
     }
     pub fn get_brk(&self)->Vaddr{
@@ -275,159 +380,6 @@ impl MmStruct {
     pub fn drop_vma(&mut self,vaddr:Vaddr)->Option<VMA>{
         self.vmas.remove(&vaddr)
     }
-    // arg len not check
-    // helper func, can be only invoked by get_unmapped_area_no_insert
-    // vaddr=>vaddr+len must in map space, checked by caller
-    // fn _get_unmapped_area_assign_no_insert(&mut self, len:usize, flags:u8, vaddr: Vaddr) ->Option<Arc<VMA>>{
-    //     assert!(vaddr.is_align());
-    //     let mut ret :Option<Arc<VMA>> = None;
-    //     if self.vmas.is_empty() {
-    //         return  Some(VMA::new(
-    //             vaddr,
-    //             vaddr+ len,
-    //             self.pagetable.clone(),
-    //             flags,
-    //         ));
-    //     }
-    //     let mut cursor = self.vmas.cursor_front_mut();
-    //     while match cursor.index() {
-    //         Some(_)=>true,
-    //         None=>false
-    //     }{
-    //         let cur = cursor.current().unwrap();
-    //         if cur.in_vma(vaddr) {
-    //             break;
-    //         }
-    //         match cursor.peek_next() {
-    //             None => {
-    //                 // cur is last node
-    //                 ret = Some(VMA::new(
-    //                     vaddr,
-    //                     vaddr+ len,
-    //                     self.pagetable.clone(),
-    //                     flags,
-    //                 ));
-    //                 break;
-    //             }
-    //             Some(next) => {
-    //                 if next.get_start_vaddr()>vaddr{
-    //                     // have found a valid hole
-    //                     if (next.get_start_vaddr()-vaddr.0).0 >=len {
-    //                         ret = Some(VMA::new(
-    //                             vaddr,
-    //                             vaddr+ len,
-    //                             self.pagetable.clone(),
-    //                             flags
-    //                         ));
-    //                         break;
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         cursor.move_next();
-    //     }
-    //     ret
-    // }
-    //
-    // // must page align
-    // // will do check of mm range
-    // // core function
-    // pub fn _get_unmapped_area_no_insert(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>) ->Option<Arc<VMA>>{
-    //     // check len
-    //     assert_eq!(len % PAGE_SIZE, 0);
-    //     let (space_start,space_end) = if self.is_kern(){
-    //         (Vaddr(TMMAP_START),Vaddr(TMMAP_END))
-    //     } else {
-    //         (Vaddr(USER_SPACE_START),Vaddr(USER_SPACE_END))
-    //     };
-    //     if vaddr.is_some(){
-    //         assert!(vaddr.as_ref().unwrap().is_align());
-    //         let vaddr_inner = vaddr.unwrap();
-    //         if vaddr_inner>=space_start&&vaddr_inner<space_end {
-    //             return self._get_unmapped_area_assign_no_insert(len, flags, vaddr_inner);
-    //         } else {
-    //             return None;
-    //         }
-    //     }
-    //     if self.vmas.is_empty() {
-    //         return  Some(VMA::new(
-    //             space_start,
-    //             {let end = space_start + len;
-    //                 if end>=space_end {
-    //                     return None;
-    //                 }
-    //                 end},
-    //             self.pagetable.clone(),
-    //             flags,
-    //         ));
-    //     }
-    //     let mut ret :Option<Arc<VMA>> = None;
-    //     let mut cursor = self.vmas.cursor_front_mut();
-    //     while match cursor.index() {
-    //         Some(_)=>true,
-    //         None=>false
-    //     }{
-    //         let cur_end_addr = cursor.current().unwrap().get_end_vaddr();
-    //         match cursor.peek_next() {
-    //             None => {
-    //                 // cur is last node
-    //                 // check Mm range
-    //                 // todo check Mm range
-    //                 ret = Some(VMA::new(
-    //                     cur_end_addr,
-    //                     {
-    //                         let end = cur_end_addr+ len;
-    //                         if end>=space_end{
-    //                             return None;
-    //                         }
-    //                         end
-    //                     },
-    //                     self.pagetable.clone(),
-    //                     flags
-    //                 ));
-    //                 break;
-    //             }
-    //             Some(next) => {
-    //                 if (next.get_start_vaddr()-cur_end_addr.0).0 >= len {
-    //                     // have found a valid hole
-    //                     ret = Some(VMA::new(
-    //                         cur_end_addr,
-    //                         cur_end_addr+ len,
-    //                         self.pagetable.clone(),
-    //                         flags
-    //                     ));
-    //                     break;
-    //                 }
-    //             }
-    //         }
-    //         cursor.move_next();
-    //     }
-    //     ret
-    // }
-
-    // len/vaddr必须align
-    // 会自动插入area
-    // pub fn get_unmapped_area(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>)->Option<Arc<VMA>> {
-    //     self._get_unmapped_area_no_insert(len, flags, vaddr).map(|area|{
-    //         self.__insert_vma(area.clone());
-    //         area
-    //     })
-    // }
-
-    // pub fn get_unmapped_area_alloc(&mut self, len:usize, flags:u8, vaddr:Option<Vaddr>) ->Option<Arc<VMA>>{
-    //     self.get_unmapped_area(len,flags,vaddr).map(|area|{
-    //         let addr_ = if vaddr.is_some(){
-    //             vaddr.unwrap()
-    //         } else {
-    //             area.get_start_vaddr()
-    //         };
-    //         for i in addr_.page_addr_iter(len){
-    //             area._annon_fast_alloc_one_page(i);
-    //         }
-    //         area
-    //     })
-    // }
-
     // 只能在页表已经install的时候使用
     pub unsafe fn flush(&self){
         self.pagetable.flush_self();

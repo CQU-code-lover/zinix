@@ -15,6 +15,7 @@ pub mod superblock;
 pub mod dfile;
 pub mod fcntl;
 pub mod pipe;
+pub mod poll;
 
 pub fn init_fs(){
     fat_init();

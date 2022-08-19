@@ -58,7 +58,7 @@ pub fn syscall_fs_entry(tf:&mut TrapFrame, syscall_id:usize){
         }
         SYSCALL_NEW_FSTATAT=>{
             let ret = sys_newfstatat(tf.arg0() as isize,tf.arg1(),tf.arg2(),tf.arg3() as u32);
-            trace_sync!("new_fstatat:fd:{},path_addr:{:#X},buf_addr:{:#X},flags:{:#b},ret:{}",tf.arg0() as isize,tf.arg1(),tf.arg2(),tf.arg3() as u32,ret);
+            info_sync!("new_fstatat:fd:{},path_addr:{:#X},buf_addr:{:#X},flags:{:#b},ret:{}",tf.arg0() as isize,tf.arg1(),tf.arg2(),tf.arg3() as u32,ret);
             ret
         }
         SYSCALL_FCNTL=>{
@@ -98,9 +98,9 @@ fn sys_pipe(pipe :usize,flags:usize)->isize{
             }
         }
     }
-    unsafe { Vaddr(pipe).write_single(readfd as u32).unwrap() }
-    unsafe { Vaddr(pipe+size_of::<u32>()).write_single(readfd as u32).unwrap() }
-    trace_sync!("sys_pipe: pipe[2]:{:#X},flags:{:b},ret:{}",pipe,flags,ret);
+    unsafe {Vaddr(pipe).write_single(readfd as u32).unwrap()}
+    unsafe {Vaddr(pipe+size_of::<u32>()).write_single(readfd as u32).unwrap()}
+    info_sync!("sys_pipe: pipe[2]:{:#X},flags:{:b},rfd:{},wfd{},ret:{}",pipe,flags,readfd,writefd,ret);
     ret
 }
 
@@ -154,12 +154,13 @@ fn sys_fcntl(fd:usize,cmd:u32,arg:usize)->isize{
             }
         }
     };
-    trace_sync!("fcntl:fd:{},cmd:{},arg:{},ret:{}",fd,cmd_str,arg,ret);
+    info_sync!("fcntl:fd:{},cmd:{},arg:{},ret:{}",fd,cmd_str,arg,ret);
     ret
 }
 
 fn sys_newfstatat(fd:isize,path_addr:usize,buf:usize,flags:u32)->isize{
     let path = convert_cstr_from_vaddr(Vaddr(path_addr));
+    info_sync!("newfstat path:{}",&path);
     let mut stat = NewStat::empty();
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
@@ -196,6 +197,7 @@ fn sys_newfstatat(fd:isize,path_addr:usize,buf:usize,flags:u32)->isize{
 
 // 未打开的fd是none 此时会错误返回
 fn sys_close(fd:isize)->isize{
+    info_sync!("close fd:{}",fd);
     let mut running = get_running();
     let mut tsk = running.lock_irq().unwrap();
     return match tsk.clear_opened(fd as usize) {
@@ -216,6 +218,11 @@ fn sys_close(fd:isize)->isize{
 }
 
 fn do_dup(old_fd:isize,new_fd:Option<isize>,open_flags_bits:Option<usize>)->isize{
+    if new_fd.is_some() {
+        info_sync!("dup {}=>{}",old_fd,new_fd.as_ref().unwrap().clone());
+    } else {
+        info_sync!("dup {}=>*",old_fd);
+    }
     let mut running = get_running();
     let mut tsk = running.lock_irq().unwrap();
     match tsk.get_opened(old_fd as usize) {
@@ -253,7 +260,7 @@ fn do_dup(old_fd:isize,new_fd:Option<isize>,open_flags_bits:Option<usize>)->isiz
 }
 
 fn sys_openat(dirfd:isize,filename:String,flags:OpenFlags,mode:OpenMode)->isize{
-    trace_sync!("openat: dirfd{} filename {}",dirfd,&filename);
+    info_sync!("openat: dirfd{} filename {}",dirfd,&filename);
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
     let dir_dfile = if dirfd==AT_FDCWD {
@@ -317,6 +324,9 @@ fn sys_write(fd:isize,ptr:usize,len:usize)->isize{
     let buf = slice_from_raw_parts(ptr as *const u8,len);
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
+    if fd ==0{
+        error_sync!("stdin!");
+    }
     match tsk.get_opened(fd as usize){
         None => {
             return -1;
@@ -366,6 +376,10 @@ fn sys_writev(fd:isize,iov_array_base:usize,len:usize)->isize{
     struct IOVEC{
         iov_base:*mut u8,
         iov_len:usize
+    }
+
+    if fd==0{
+        error_sync!("stdin!");
     }
     let mut len_res = len;
     let len_need_read = len_res;

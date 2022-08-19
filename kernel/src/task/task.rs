@@ -13,9 +13,9 @@ use fatfs::Read;
 use log::error;
 use crate::asm::{disable_irq, enable_irq, r_sp, r_sstatus, r_tp, SSTATUS_SIE, SSTATUS_SPIE, SSTATUS_SPP};
 use crate::consts::{BOOT_STACK_NR_PAGES, MAX_ORDER, PAGE_SIZE, STACK_MAGIC, USER_STACK_MAX_ADDR};
-use crate::mm::mm::MmStruct;
+use crate::mm::mm::{MmStruct, new_mm_by_old};
 use crate::mm::pagetable::PageTable;
-use crate::{error_sync, info_sync, println, SpinLock, trace_sync};
+use crate::{error_sync, info_sync, println, SpinLock, trace_sync, warn_sync};
 use crate::task::{add_task, generate_tid};
 use crate::task::stack::Stack;
 use riscv::register::*;
@@ -141,7 +141,7 @@ impl TaskContext {
 pub struct Task {
     tid: usize,
     tgid: usize,
-    kernel_stack: Stack,
+    pub kernel_stack: Stack,
     pub context: TaskContext,
     parent: Option<Weak<SpinLock<Task>>>,
     status: TaskStatus,
@@ -151,6 +151,7 @@ pub struct Task {
     pub pwd_dfile:Arc<DFile>,
     pub set_child_tid: usize,
     pub clear_child_tid: usize,
+    pub exit_code:i32
 }
 
 fn get_init_pwd()->String {
@@ -185,7 +186,8 @@ impl Task {
             pwd:get_init_pwd(),
             pwd_dfile:DFile::get_root(),
             set_child_tid: 0,
-            clear_child_tid: 0
+            clear_child_tid: 0,
+            exit_code: 0
         };
         sscratch::write(0);
         unsafe {
@@ -215,9 +217,9 @@ impl Task {
     pub fn set_status(&mut self,status :TaskStatus) {
         self.status = status;
     }
-    pub fn get_opened(&mut self, fd:usize) ->Option<Arc<DFile>>{
+    pub fn get_opened(&self, fd:usize) ->Option<Arc<DFile>>{
         if fd < self.opened.len() {
-            self.opened[fd].as_mut().map(|x|{
+            self.opened[fd].as_ref().map(|x|{
                 x.clone()
             })
         } else {
@@ -225,6 +227,7 @@ impl Task {
         }
     }
     pub fn set_opened(&mut self, fd:usize, file:Option<Arc<DFile>>)->Result<Option<Arc<DFile>>,()>{
+        info_sync!("set opened {}",fd);
         if fd < self.opened.len() {
             let ret = self.opened[fd].as_ref().map(|x|{
                 x.clone()
@@ -244,6 +247,7 @@ impl Task {
                 None => {
                     // find empty
                     self.opened[i] = Some(file);
+                    warn_sync!("alloc opened {}",i);
                     return Some(i);
                 }
                 Some(_) => {}
@@ -293,7 +297,8 @@ impl Task {
             pwd:get_init_pwd(),
             pwd_dfile: DFile::get_root(),
             set_child_tid: 0,
-            clear_child_tid: 0
+            clear_child_tid: 0,
+            exit_code: 0
         };
         tsk.context.ra = kern_trap_ret as usize;
         unsafe { tsk.context.sp = tsk.kernel_stack.get_end() - size_of::<TrapFrame>(); }
@@ -308,6 +313,19 @@ impl Task {
     pub fn create_kern_task_and_run(func:fn()){
         add_task(Arc::new(SpinLock::new(Self::create_kern_task(func))))
     }
+    pub fn execve_from_tsk(&mut self,tsk:Arc<SpinLock<Task>>)->Arc<SpinLock<MmStruct>>{
+        let tsk = tsk.lock_irq().unwrap();
+        let old_mm = self.mm.as_ref().unwrap().clone();
+        self.mm = Some(tsk.mm.as_ref().unwrap().clone());
+        for i in 0..tsk.opened.len(){
+            self.set_opened(i,tsk.opened[i].as_ref().map(|x|{x.clone()}));
+        }
+        self.pwd_dfile = tsk.pwd_dfile.clone();
+        self.pwd = tsk.pwd.clone();
+
+        old_mm
+    }
+
     pub unsafe fn create_user_task(path:&str,args:Vec<String>)->Option<Arc<SpinLock<Task>>>{
         let node = match Inode::get_root().get_node_by_path(path) {
             Some(node)=> {
@@ -340,7 +358,8 @@ impl Task {
             pwd:get_init_pwd(),
             pwd_dfile: DFile::get_root(),
             set_child_tid: 0,
-            clear_child_tid: 0
+            clear_child_tid: 0,
+            exit_code: 0
         };
         tsk.opened[0] = Some(Arc::new(DFile::new_stdin()));
         tsk.opened[1] = Some(Arc::new(DFile::new_stdout()));
@@ -544,23 +563,49 @@ impl Task {
         self.mm.as_ref().unwrap().lock_irq().unwrap().install_pagetable();
     }
     // fork一个cow的新进程
-    pub fn vfork_step_one(&self)->Self{
+    // 但是结束后需要手动填充parent
+    fn __vfork_step_one(&self, mut tf:TrapFrame) ->Self{
         let new_tid = generate_tid();
-        Self{
+        let mut new_tsk = Self{
             tid: new_tid,
             tgid: new_tid,
-            kernel_stack: Stack::new_by_copy_from(&self.kernel_stack),
+            kernel_stack: Stack::new(false,0,0),
             context: self.context.clone(),
             parent: None,
             status: TaskStatus::TaskRunning,
-            mm: None,
+            mm: Some(Arc::new(SpinLock::new(new_mm_by_old(self.mm.as_ref().unwrap().clone())))),
             opened: vec![],
             pwd: self.pwd.clone(),
-            pwd_dfile: Arc::new(self.pwd_dfile.clone()),
+            pwd_dfile: self.pwd_dfile.clone(),
             set_child_tid: 0,
-            clear_child_tid: 0
+            clear_child_tid: 0,
+            exit_code: 0
+        };
+        // clone opened fd table
+        for i in 0..self.opened.len(){
+            new_tsk.opened.push(self.get_opened(i).map(|x| {
+                x.clone()
+            }));
         }
+        let new_kstack_top = new_tsk.kernel_stack.get_end() - size_of::<TrapFrame>();
+        // set sscratch
+        tf.x2 = new_kstack_top;
+        // sscratch存放的用户栈 所以不需要进行修改
+        // tf.sscratch = new_tsk.kernel_stack.get_end();
+        unsafe { tf.write_to(new_kstack_top);}
+        // let new_tf = unsafe { (*(new_kstack_top as *const TrapFrame)).clone() };
+        // println!("{:?}",new_tf);
+        // shutdown();
+        new_tsk.context.ra = user_trap_ret as usize;
+        new_tsk.context.sp = new_kstack_top;
+        new_tsk
     }
+}
+
+pub fn do_fork(tsk:Arc<SpinLock<Task>>,tf:TrapFrame)->Task{
+    let mut new = tsk.lock_irq().unwrap().__vfork_step_one(tf);
+    new.parent = Some(Arc::downgrade(&tsk));
+    new
 }
 
 pub fn task_cpu_init(){

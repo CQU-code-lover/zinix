@@ -8,11 +8,12 @@ use core::mem::size_of;
 use core::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use fatfs::error;
 use crate::{error_sync, info_sync, println, trace_sync, warn_sync};
+use crate::fs::poll::PollFd;
 use crate::mm::addr::Vaddr;
 use crate::sbi::shutdown;
 use crate::syscall::sys_fs::syscall_fs_entry;
 use crate::syscall::sys_proc::syscall_proc_entry;
-use crate::task::exit_self;
+use crate::task::{exit_self, sleep_self_in_sleeping_list};
 use crate::task::task::get_running;
 use crate::trap::TrapFrame;
 use crate::utils::convert_cstr_from_vaddr;
@@ -39,6 +40,7 @@ pub const SYSCALL_WRITE: usize = 64;
 pub const SYSCALL_WRITEV: usize = 66;
 pub const SYSCALL_SENDFILE: usize = 71;
 pub const SYSCALL_PSELECT6: usize = 72;
+pub const SYSCALL_PPOLL: usize = 73;
 pub const SYSCALL_READLINKAT: usize = 78;
 pub const SYSCALL_NEW_FSTATAT: usize = 79;
 pub const SYSCALL_FSTAT:usize = 80;
@@ -66,12 +68,12 @@ pub const SYSCALL_GETUID: usize = 174;
 pub const SYSCALL_GETEUID: usize = 175;
 pub const SYSCALL_GETGID: usize = 176;
 pub const SYSCALL_GETEGID: usize = 177;
-pub const SYSCALL_GETTID: usize = 177;
+pub const SYSCALL_GETTID: usize = 178;
 pub const SYSCALL_SBRK: usize = 213;
 pub const SYSCALL_BRK: usize = 214;
 pub const SYSCALL_MUNMAP: usize = 215;
 pub const SYSCALL_CLONE: usize = 220;
-pub const SYSCALL_EXEC: usize = 221;
+pub const SYSCALL_EXECVE: usize = 221;
 pub const SYSCALL_MMAP: usize = 222;
 pub const SYSCALL_MPROTECT: usize = 226;
 pub const SYSCALL_WAIT4: usize = 260;
@@ -88,16 +90,19 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
     warn_sync!("[syscall:{}]",syscall_id);
     match syscall_id {
         // todo signal
+        SYSCALL_PPOLL =>{
+            let ptr = trap_frame.arg0();
+            let e = (*(ptr as *const PollFd)).clone();
+            println!("{:?},cnt:{}",e,trap_frame.arg1());
+            loop{sleep_self_in_sleeping_list();}
+            // error_sync!("ppoll");
+            // trap_frame.ok()
+        }
         SYSCALL_SIGACTION => {
             trap_frame.ok()
         }
         SYSCALL_SIGPROCMASK =>{
             trap_frame.ok()
-        }
-        SYSCALL_EXIT =>{
-            println!("EXIT");
-            trap_frame.ok();
-            exit_self();
         }
         SYSCALL_EXIT_GRUOP =>{
             trap_frame.ok();
@@ -116,11 +121,11 @@ pub unsafe fn syscall_entry(trap_frame:&mut TrapFrame){
             syscall_fs_entry(trap_frame,syscall_id);
         }
         SYSCALL_BRK|SYSCALL_MMAP|SYSCALL_GETPID|SYSCALL_GETPPID|SYSCALL_UNAME|SYSCALL_GETCWD|
-        SYSCALL_CLONE|SYSCALL_SET_TID_ADDRESS=> {
+        SYSCALL_CLONE|SYSCALL_SET_TID_ADDRESS|SYSCALL_WAIT4|SYSCALL_GETTID|SYSCALL_EXIT|SYSCALL_EXECVE=> {
             syscall_proc_entry(trap_frame,syscall_id);
         }
         _ => {
-            error_sync!("syscall not register");
+            error_sync!("syscall[{}] not register",syscall_id);
         }
     }
 }

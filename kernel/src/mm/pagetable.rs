@@ -299,6 +299,34 @@ impl PageTable {
         }
         true
     }
+    // 如果不存在映射 那么返回Err
+    pub fn change_map_flags(&self,vaddr:Vaddr,new_flags:u8)->Result<(),()>{
+        let r = self.walk(vaddr.0);
+        if r.is_none(){
+            return Err(());
+        }
+        let lock = self.private_pgs.lock_irq().unwrap();
+        let r = r.unwrap();
+        match r.level {
+            WalkRetLevelLeaf => {
+                let pte_val = unsafe { get_usize_by_addr(r.pte_addr) };
+                let mut pte = PTE::from(pte_val);
+                if !pte.vaild() {
+                    return Err(());
+                }
+                pte.clear_all_flags();
+                pte.set_flags(new_flags);
+                let new_pte_val = pte.into();
+                unsafe { set_usize_by_addr(r.pte_addr, new_pte_val) };
+            },
+            _ => {
+                return Err(());
+            }
+        }
+        // clear tlb entry
+        unsafe { sfence_vma_all(); }
+        Ok(())
+    }
 
     // 不支持force map，force map可以使用unmap组合实现
     pub fn map_one_page(&self, vaddr: Vaddr, paddr:Paddr, flags:u8)->Result<(),isize> {
@@ -323,7 +351,7 @@ impl PageTable {
             }
         }
         // clear tlb entry
-        unsafe { sfence_vma_vaddr(vaddr.get_inner()); }
+        unsafe { sfence_vma_all(); }
         Ok(())
     }
 
@@ -393,7 +421,6 @@ impl PageTable {
         }
         Ok(ret_option.unwrap())
     }
-
     // todo map的pages需要添加到mm空间的表中
     pub unsafe fn flush_self(&self){
         sfence_vma_all();
@@ -414,7 +441,7 @@ impl Default for PageTable {
 
 impl Drop for PageTable {
     fn drop(&mut self) {
-        todo!()
+        // todo!()
     }
 }
 

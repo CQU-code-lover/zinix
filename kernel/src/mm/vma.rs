@@ -22,6 +22,7 @@ use crate::mm::pagetable::{PageTable, PTEFlags};
 use crate::pre::{InnerAccess, ReadWriteOffUnsafe, ReadWriteSingleNoOff, ReadWriteSingleOff, ShowRdWrEx};
 use crate::{error_sync, info_sync, println, SpinLock};
 use crate::fs::inode::Inode;
+use crate::sbi::shutdown;
 
 bitflags! {
     pub struct VmFlags: usize {
@@ -85,16 +86,17 @@ bitflags! {
 // }
 
 pub struct VMA{
-    start_vaddr: Vaddr,
-    end_vaddr: Vaddr,
+    pub start_vaddr: Vaddr,
+    pub end_vaddr: Vaddr,
     pub vm_flags:VmFlags,
-    pages_tree:BTreeMap<Vaddr,Arc<Page>>,
+    pub pages_tree:BTreeMap<Vaddr,Arc<Page>>,
     pub pagetable:Option<Arc<PageTable>>,
     pub file:Option<Arc<Inode>>,
     pub file_off:usize,
     pub file_in_vma_off:usize,
     pub file_len:usize,
-    phy_pgs_cnt:usize
+    pub phy_pgs_cnt:usize,
+    pub cow_write_reserve_pgs:Option<BTreeMap<Vaddr,Arc<Page>>>
 }
 
 impl ShowRdWrEx for VMA{
@@ -145,7 +147,7 @@ impl Debug for VMA {
     }
 }
 
-fn _vma_flags_2_pte_flags(f:VmFlags)->u8{
+pub fn _vma_flags_2_pte_flags(f:VmFlags)->u8{
     (((f.bits&0b1111)<<1) as u8)|PTEFlags::V.bits()
 }
 
@@ -161,7 +163,8 @@ impl VMA {
             file_off: 0,
             file_in_vma_off: 0,
             file_len: 0,
-            phy_pgs_cnt: 0
+            phy_pgs_cnt: 0,
+            cow_write_reserve_pgs: None
         }
     }
     pub fn new(start_vaddr: Vaddr, end_vaddr: Vaddr,
@@ -182,6 +185,7 @@ impl VMA {
             file_in_vma_off,
             file_len,
             phy_pgs_cnt: 0,
+            cow_write_reserve_pgs: None
         }
     }
     pub fn new_anon(start_vaddr: Vaddr, end_vaddr: Vaddr,vm_flags:VmFlags,
@@ -360,27 +364,42 @@ impl VMA {
 
             let pages = alloc_one_page().unwrap();
             let flags = self.get_flags();
-            self.pagetable.as_mut().unwrap().map_one_page(vaddr, pages.get_paddr(), _vma_flags_2_pte_flags(flags)).unwrap();
+            if self.pagetable.as_mut().unwrap().map_one_page(vaddr, pages.get_paddr(), _vma_flags_2_pte_flags(flags)).is_err(){
+                todo!()
+            }
             self.pages_tree.insert(vaddr, pages.clone());
             return pages;
         } else {
             self._find_page(vaddr).unwrap()
         }
     }
+    //单独map到一个新的物理页
+    //会强制map
+    pub fn _cow_remap_one_page(&mut self,vaddr:Vaddr,data_pg:Arc<Page>)->Result<(),()>{
+        self.pagetable.as_ref().unwrap().unmap_pages(vaddr, 0);
+        let new_pg = alloc_one_page().unwrap();
+        unsafe { new_pg.copy_one_page_data_from(data_pg); }
+        let flags = _vma_flags_2_pte_flags(self.vm_flags);
+        self.pagetable.as_ref().unwrap().map_one_page(vaddr, new_pg.get_paddr(), flags).unwrap();
+        self.pages_tree.insert(vaddr, new_pg);
+        Ok(())
+    }
     // for lazy map
-    pub fn _do_alloc_one_page(&mut self,vaddr:Vaddr)->Result<(),()>{
+    pub fn _do_alloc_one_page(&mut self,vaddr:Vaddr)->Result<Arc<Page>,()>{
         if !vaddr.is_align() || !self.in_vma(vaddr) {
             return Err(());
         }
+        let mut ret_pg:Option<Arc<Page>> = None;
         if self.is_anon(){
             // alloc and map but not fill with data
-            self.__fast_alloc_one_page(vaddr);
+            ret_pg = Some(self.__fast_alloc_one_page_and_get(vaddr));
         } else {
             let file_map_start_vaddr = self.start_vaddr+self.file_in_vma_off;
             let file_map_end_vaddr = self.start_vaddr+self.file_in_vma_off+self.file_len;
             if vaddr<file_map_start_vaddr{
                 if (vaddr+PAGE_SIZE)>file_map_start_vaddr{
                     let pg = self.__fast_alloc_one_page_and_get(vaddr);
+                    ret_pg = Some(pg.clone());
                     let ptr = pg.get_vaddr().get_inner() as *mut u8;
                     let buf = slice_from_raw_parts_mut(ptr,PAGE_SIZE);
                     let mut left_off:usize = 0;
@@ -399,11 +418,11 @@ impl VMA {
                     assert_eq!(real_read,need_read);
                 }  else {
                     // map with no data
-                    self.__fast_alloc_one_page(vaddr);
+                    ret_pg = Some(self.__fast_alloc_one_page_and_get(vaddr));
                 }
             } else {
                 if vaddr>=file_map_end_vaddr{
-                    self.__fast_alloc_one_page(vaddr);
+                    ret_pg = Some(self.__fast_alloc_one_page_and_get(vaddr));
                 } else {
                     let mut right_off:usize = 0;
                     if (vaddr+PAGE_SIZE)<=file_map_end_vaddr{
@@ -413,6 +432,7 @@ impl VMA {
                     }
                     let real_in_file_off = (vaddr-file_map_start_vaddr.0).0+self.file_off;
                     let pg = self.__fast_alloc_one_page_and_get(vaddr);
+                    ret_pg = Some(pg.clone());
                     let ptr = pg.get_vaddr().get_inner() as *mut u8;
                     let buf = slice_from_raw_parts_mut(ptr,PAGE_SIZE);
                     let need_read = right_off;
@@ -430,7 +450,7 @@ impl VMA {
             // set dirty
             self.__set_dirty();
         }
-        Ok(())
+        Ok(ret_pg.unwrap())
     }
     fn __release_one_page(&mut self,vaddr:Vaddr){
         match self.pages_tree.remove(&vaddr) {

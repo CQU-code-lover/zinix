@@ -16,7 +16,7 @@ use crate::mm::mm::MmStruct;
 use crate::mm::pagetable::PageTable;
 use crate::sbi::shutdown;
 use crate::task::task::{get_running, set_running, Task, TaskContext, TaskStatus};
-use crate::task::task::TaskStatus::TaskZombie;
+use crate::task::task::TaskStatus::{TaskRunning, TaskZombie};
 use crate::trap::TrapFrame;
 
 pub(crate) mod task;
@@ -38,6 +38,15 @@ lazy_static! {
     static ref exit_list : SpinLock<LinkedList<Arc<SpinLock<Task>>>> = SpinLock::new(LinkedList::new());
 }
 
+fn wake_up_all_sleeping(){
+    let mut sleeping_locked = sleep_list.lock_irq().unwrap();
+    for i in 0..sleeping_locked.len(){
+        let t = sleeping_locked.pop_back().unwrap();
+        t.lock_irq().unwrap().set_status(TaskRunning);
+        add_task(t);
+    }
+}
+
 fn generate_tid() -> usize {
     g_tid.fetch_add(1, Ordering::SeqCst)
 }
@@ -50,10 +59,54 @@ pub fn add_task(task: Arc<SpinLock<Task>>) {
     running_list.lock().unwrap().push_back(task);
 }
 
-pub fn exit_self(){
+pub fn exit_self(exit_code:i32){
     let this_task = get_running();
-    this_task.lock_irq().unwrap().set_status(TaskZombie);
+    let mut tsk = this_task.lock_irq().unwrap();
+    tsk.exit_code = exit_code;
+    tsk.set_status(TaskZombie);
+    wake_up_all_sleeping();
     scheduler(None);
+}
+
+pub fn sleep_self_in_sleeping_list(){
+    get_running().lock_irq().unwrap().set_status(TaskStatus::TaskSleeping);
+    scheduler(None);
+}
+
+pub fn wait_for(tid:usize)->(i32,usize){
+    loop {
+        let mut locked_sl = sleep_list.lock_irq().unwrap();
+        for i in locked_sl.iter(){
+            let i_locked =i.lock_irq().unwrap();
+            if i_locked.get_tid() == tid {
+                return (i_locked.exit_code,tid);
+            }
+        }
+        drop(locked_sl);
+        sleep_self_in_sleeping_list();
+        locked_sl = sleep_list.lock_irq().unwrap();
+    }
+}
+
+pub fn wait_children(ptid:usize)->(i32,usize){
+    loop {
+        let mut locked_sl = sleep_list.lock_irq().unwrap();
+        for i in locked_sl.iter(){
+            let i_lock = i.lock_irq().unwrap();
+            let p = i_lock.get_parent();
+            if p.is_none(){
+                continue;
+            }
+            let ptid_now  = p.unwrap().lock_irq().unwrap().get_tid();
+            if ptid_now==ptid{
+                // find
+                return (i_lock.exit_code,i_lock.get_tid());
+            }
+        }
+        drop(locked_sl);
+        sleep_self_in_sleeping_list();
+        locked_sl = sleep_list.lock_irq().unwrap();
+    }
 }
 
 pub fn get_task() -> Arc<SpinLock<Task>> {
@@ -106,7 +159,10 @@ pub fn scheduler(sleep_list_assign:Option<&SpinLock<LinkedList<Arc<SpinLock<Task
         // let ttff = unsafe {&*(next_locked.context.sp as *const TrapFrame)};
         // println!("{:?}",ttff);
         // shutdown();
+        info_sync!("run tid:{},user",next_locked.get_tid());
         unsafe { next_locked.install_pagetable(); }
+    } else {
+        info_sync!("run tid:{},kernel",next_locked.get_tid());
     }
     drop(next_locked);
     drop(rs);

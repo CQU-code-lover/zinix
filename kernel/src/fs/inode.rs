@@ -241,7 +241,11 @@ impl Inode {
         let name_array_pre:Vec<&str> = path.split("/").collect();
         let name_array:Vec<&str> = name_array_pre.into_iter().filter(
             |x| {
-                if (*x).is_empty(){ false } else { true }
+                if (*x).is_empty()||(*x).eq("."){
+                    false
+                } else {
+                    true
+                }
             }
         ).collect();
         if name_array.is_empty(){

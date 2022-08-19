@@ -85,7 +85,7 @@ pub unsafe fn do_test(){
     // test_pipe();
     // mm_test();
     // test_kmap();
-    // Task::create_user_task_and_run("m.o",vec![]);
+    // Task::create_user_task_and_run("clone",vec![]);
     // virtio_test();
     // shutdown();
     // Task::create_user_task_and_run("entry-static.exe",vec!["statvfs".to_string()]);

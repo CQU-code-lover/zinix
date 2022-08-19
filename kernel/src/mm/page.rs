@@ -8,6 +8,7 @@ use core::borrow::BorrowMut;
 use core::cell::{Ref, RefCell};
 use core::cmp::min;
 use core::default::default;
+use core::mem::size_of;
 use core::ops::{Index, IndexMut};
 use core::pin::Pin;
 use fatfs::{IoBase, Read, Seek, SeekFrom, Write};
@@ -276,6 +277,16 @@ impl Page {
 
     fn flush(&mut self) -> Result<(), ()> {
         (self.vaddr+self.inner.lock().unwrap().pos).flush()
+    }
+    pub unsafe fn copy_one_page_data_from(&self,pg:Arc<Page>){
+        let dest = self.get_vaddr();
+        let src = pg.get_vaddr();
+        let mut i = 0;
+        while i < PAGE_SIZE {
+            let tmp:usize = (src+i).read_single().unwrap();
+            (dest+i).write_single(tmp).unwrap();
+            i+=size_of::<usize>();
+        }
     }
 }
 

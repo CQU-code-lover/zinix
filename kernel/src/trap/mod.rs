@@ -1,9 +1,12 @@
 pub mod timer;
 
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use core::arch::{asm, global_asm};
 use core::arch::riscv64::{fence_i, sfence_vma_all, sfence_vma_vaddr};
 use core::fmt::{Debug, Formatter};
 use core::mem::size_of;
+use fatfs::Write;
 use log::debug;
 use riscv::register::{sie, sstatus, stvec, scause};
 use riscv::register::scause::{Exception, Interrupt, Scause, Trap};
@@ -12,11 +15,12 @@ use riscv::register::stvec::TrapMode;
 use crate::{debug_sync, info_sync, println, r_sstatus, trace_sync, warn_sync};
 use crate::asm::{disable_irq, enable_irq, r_satp, r_scause, r_stval, SSTATUS_SPP};
 use crate::consts::PHY_MEM_OFFSET;
-use crate::mm::{get_kernel_mm, get_kernel_pagetable};
+use crate::mm::{alloc_one_page, get_kernel_mm, get_kernel_pagetable};
 use crate::mm::addr::{Paddr, PageAlign, Vaddr};
+use crate::mm::page::Page;
 use crate::mm::pagetable::{PageTable, PTEFlags};
-use crate::mm::vma::VMA;
-use crate::pre::{InnerAccess, ReadWriteSingleNoOff};
+use crate::mm::vma::{_vma_flags_2_pte_flags, MmapProt, VMA, VmFlags};
+use crate::pre::{InnerAccess, ReadWriteSingleNoOff, ShowRdWrEx};
 use crate::sbi::shutdown;
 use crate::syscall::syscall_entry;
 use crate::task::task::{get_running, RUNNING_TASK};
@@ -24,6 +28,7 @@ use crate::trap::timer::timer_entry;
 use crate::utils::{memcpy, set_usize_by_addr};
 global_asm!(include_str!("trap_asm.s"));
 
+#[derive(Clone)]
 #[repr(C)]
 pub struct TrapFrame{
     pub sepc:usize,   //sepc
@@ -121,9 +126,9 @@ impl TrapFrame {
         let len = size_of::<Self>();
         memcpy(addr, self as *mut TrapFrame as usize,len);
     }
-    pub unsafe fn write_to(&mut self,addr:usize){
+    pub unsafe fn write_to(&self,addr:usize){
         let len = size_of::<Self>();
-        memcpy( addr,self as *mut TrapFrame as usize,len);
+        memcpy( addr,self as *const TrapFrame as usize,len);
     }
     pub fn ok(&mut self){
         self.x10 = 0;
@@ -216,14 +221,8 @@ fn exc_handler(trap_frame:&mut TrapFrame){
                         todo!()
                     }
                     Exception::UserEnvCall => {
-                        if r_sstatus()&SSTATUS_SPP!=0{
-                            panic!("11");
-                        }
                         syscall_entry(trap_frame);
                         trap_frame.sepc+=4;
-                        if r_sstatus()&SSTATUS_SPP!=0{
-                            panic!("22");
-                        }
                         info_sync!("syscall");
                     }
                     Exception::InstructionPageFault|Exception::InstructionFault => {
@@ -232,7 +231,7 @@ fn exc_handler(trap_frame:&mut TrapFrame){
                             info_sync!("change spp");
                         }
                         let vaddr = r_stval();
-                        trap_page_fault_handler(Vaddr(vaddr));
+                        trap_page_fault_handler(Vaddr(vaddr),PgFaultProt::EXEC);
                         // unsafe {
                         //     // get_running().lock().unwrap().install_pagetable();
                         //     let v = *(trap_frame.sepc as *const usize);
@@ -246,22 +245,13 @@ fn exc_handler(trap_frame:&mut TrapFrame){
                         // pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(trap_frame.sepc).unwrap().get_pte();
                         // println!("{:#b}", pte.flags);
                     }
-                    Exception::LoadPageFault|Exception::LoadFault|Exception::StoreFault|
-                    Exception::StorePageFault=> {
+                    Exception::LoadPageFault|Exception::LoadFault=> {
                         let vaddr = r_stval();
-                        trap_page_fault_handler(Vaddr(vaddr));
-                        // let running = get_running();
-                        // let tsk = running.lock_irq().unwrap();
-                        // if tsk.is_kern(){
-                        //     let mut mm = get_kernel_mm();
-                        //     let va = Vaddr(r_stval()).floor();
-                        //     let vma = mm.find_vma(va).unwrap();
-                        //     vma._do_alloc_one_page(va);
-                        // } else {
-                        //     panic!("load pg fault");
-                        // }
-                        // let pte = get_running().lock().unwrap().mm.as_ref().unwrap().pagetable.walk(vaddr).unwrap().get_pte();
-                        // println!("{:#b}", pte.flags);
+                        trap_page_fault_handler(Vaddr(vaddr),PgFaultProt::Read);
+                    }
+                    Exception::StorePageFault|Exception::StoreFault =>{
+                        let vaddr = r_stval();
+                        trap_page_fault_handler(Vaddr(vaddr),PgFaultProt::Write);
                     }
                     Exception::Unknown => {
                         panic!("unrecognized exception");
@@ -285,12 +275,76 @@ pub fn trap_init(){
     }
 }
 
-fn trap_page_fault_handler(vaddr:Vaddr) ->bool{
+#[derive(Clone,PartialOrd, PartialEq)]
+enum PgFaultProt{
+    Read,
+    Write,
+    EXEC
+}
+
+#[cfg(not(feature = "copy_on_write"))]
+fn trap_page_fault_handler(vaddr:Vaddr,prot:PgFaultProt) ->bool {
     let v = vaddr.floor();
     let running = get_running();
     let mut tsk = running.lock_irq().unwrap();
     let mut mm = get_kernel_mm();
-    if tsk.is_kern(){
+    let is_kern = r_sstatus()&SSTATUS_SPP!=0;
+    if is_kern{
+        let vma_opt = mm.find_vma(v);
+        match vma_opt{
+            None => {
+                panic!("error address access!");
+            }
+            Some(vma) => {
+                if vma._find_page(v).is_some(){
+                    // 已经映射过 说明存在权限访问问题
+                    panic!("prot fault");
+                } else {
+                    vma._do_alloc_one_page(v).unwrap();
+                    return true;
+                }
+            }
+        }
+    } else {
+        let mut mm_locked = tsk.mm.as_mut().unwrap().lock_irq().unwrap();
+        let mut vma_opt = mm_locked.find_vma(v);
+        match vma_opt{
+            None => {
+                panic!("error address access!");
+            }
+            Some(vma) => {
+                if vma._find_page(v).is_some(){
+                    // 已经映射过 说明存在权限访问问题
+                    panic!("prot fault");
+                } else {
+                    vma._do_alloc_one_page(v).unwrap();
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+
+#[cfg(feature = "copy_on_write")]
+fn trap_page_fault_handler(vaddr:Vaddr,prot:PgFaultProt) ->bool{
+    match prot.clone() {
+        PgFaultProt::Read => {
+            debug_sync!("PGF:{:#X},R",vaddr);
+        }
+        PgFaultProt::Write => {
+            debug_sync!("PGF:{:#X},W",vaddr);
+        }
+        PgFaultProt::EXEC => {
+            debug_sync!("PGF:{:#X},X",vaddr);
+        }
+    }
+    let v = vaddr.floor();
+    let running = get_running();
+    let mut tsk = running.lock_irq().unwrap();
+    let mut mm = get_kernel_mm();
+    let is_kern = r_sstatus()&SSTATUS_SPP!=0;
+    if is_kern{
         let vma_opt = mm.find_vma(v);
         match vma_opt{
             None => {
@@ -312,29 +366,123 @@ fn trap_page_fault_handler(vaddr:Vaddr) ->bool{
                     println!("pggt:{:#X}",paddr);
                     panic!("error address prot!va:{:#X},pa:{:#X},PTEflags:{:b}",v,paddr,flags);
                 } else {
-
                     vma._do_alloc_one_page(v).unwrap();
                     return true;
                 }
             }
         }
     } else {
-        let mut m = tsk.mm.as_mut().unwrap().lock_irq().unwrap();
-        match m.find_vma(v){
-            None => {
-                let p:Paddr = m.pagetable._get_root_page_vaddr().into();
-                m.pagetable.walk(0x10154);
-                panic!("error address access!{:#X} {:#X}",p,r_satp()<<12);
-            }
-            Some(vma) => {
-                if vma._find_page(v).is_some(){
-                    // 已经映射过 说明存在权限访问问题
-                    panic!("error address prot!");
+        let mut tsk_mm = tsk.mm.as_mut().unwrap().lock_irq().unwrap();
+        let is_cow = tsk_mm.cow_target.is_some();
+        if is_cow {
+            let mut cow_mm_nolock = tsk_mm.cow_target.as_ref().unwrap().clone();
+            let mut cow_mm = cow_mm_nolock.lock_irq().unwrap();
+            // todo 这有个bug 当新建的cow进程使用非法权限访问时无法被捕捉到
+            match cow_mm.find_vma(v) {
+                None => {
+                    panic!("cow fail");
                 }
-                vma._do_alloc_one_page(v).unwrap();
-                debug_sync!("pgf alloc vaddr:{:#X}",v);
-                return true;
+                Some(vma) => {
+                    // 检查是否remap过，如果remap过那么存在权限问题
+                    if tsk_mm.find_vma(v).unwrap()._vaddr_have_map(v){
+                        panic!("prot fault");
+                    }
+
+                    let pg = match vma._find_page(v) {
+                        None => {
+                            //原来的vma未map
+                            vma._do_alloc_one_page(v).unwrap()
+                        }
+                        Some(s) => { s }
+                    };
+                    // 注意此时存在的两种情况
+                    // case1：pagetable没有映射所以导致进入trap
+                    // case2：pagetable已经映射了，但是prot fault
+                    match prot {
+                        PgFaultProt::Read => {
+                            // 如果为读或者执行那么会映射到cow_mm的物理页
+                            let r_vma = tsk_mm.find_vma(v).unwrap();
+                            if !r_vma.readable(){
+                                panic!("prot fault");
+                            }
+                            let map_flags = vma.get_flags() & (!VmFlags::VM_WRITE);
+                            r_vma.pagetable.as_ref().unwrap().map_one_page(
+                                v,
+                                pg.get_paddr(),
+                                _vma_flags_2_pte_flags(map_flags),
+                            );
+                        }
+                        PgFaultProt::Write => {
+                            // 判断vma是否支持write
+                            let w_vma = tsk_mm.find_vma(v).unwrap();
+                            if !w_vma.writeable(){
+                                panic!("prot fault");
+                            }
+                            // 注意cow的页可能已经被写过了 检查Vma的write tree
+                            match &vma.cow_write_reserve_pgs{
+                                None => {
+                                    //原cow mm未写 那么直接复制page tree上的数据即可
+                                    //强制进行数据map
+                                    w_vma._cow_remap_one_page(v,pg.clone()).unwrap();
+                                }
+                                Some(cwrpgs) => {
+                                    match cwrpgs.get(&v){
+                                        None => {
+                                            w_vma._cow_remap_one_page(v,pg.clone()).unwrap();
+                                        }
+                                        Some(arcpg) => {
+                                            w_vma._cow_remap_one_page(v,arcpg.clone()).unwrap();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        PgFaultProt::EXEC => {
+                            // 如果为读或者执行那么会映射到cow_mm的物理页
+                            let e_vma = tsk_mm.find_vma(v).unwrap();
+                            if !e_vma.execable(){
+                                panic!("prot fault");
+                            }
+                            let map_flags = vma.get_flags() & (!VmFlags::VM_WRITE);
+                            e_vma.pagetable.as_ref().unwrap().map_one_page(
+                                v,
+                                pg.get_paddr(),
+                                _vma_flags_2_pte_flags(map_flags),
+                            );
+                        }
+                    }
+                }
+            }
+            unsafe { sfence_vma_all(); }
+        } else {
+            match tsk_mm.find_vma(v){
+                None => {
+                    let p:Paddr = tsk_mm.pagetable._get_root_page_vaddr().into();
+                    panic!("error address access!{:#X} {:#X}",p,r_satp()<<12);
+                }
+                Some(vma) => {
+                    match vma._find_page(v){
+                        Some(pg) => {
+                            // 已经映射过 说明存在权限访问问题或者是作为被cow的vma
+                            if prot==PgFaultProt::Write&&vma.cow_write_reserve_pgs.is_some(){
+                                let new_flags = _vma_flags_2_pte_flags(vma.vm_flags);
+                                vma.pagetable.as_ref().unwrap().change_map_flags(v,new_flags).unwrap();
+                                let fixed_pg = alloc_one_page().unwrap();
+                                unsafe { fixed_pg.copy_one_page_data_from(pg) };
+                                vma.cow_write_reserve_pgs.as_mut().unwrap().insert(v,fixed_pg);
+                            } else {
+                                panic!("error address prot!");
+                            }
+                        }
+                        None => {
+                            vma._do_alloc_one_page(v).unwrap();
+                            debug_sync!("pgf alloc vaddr:{:#X}",v);
+                            return true;
+                        }
+                    }
+                }
             }
         }
+        true
     }
 }

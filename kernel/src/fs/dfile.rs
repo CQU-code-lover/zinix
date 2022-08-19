@@ -63,6 +63,7 @@ impl<'a> DirEntryWrapper<'a> {
     }
 }
 
+#[derive(Clone)]
 pub enum TerminalType{
     STDIN,
     STDOUT,
@@ -70,6 +71,7 @@ pub enum TerminalType{
 }
 
 const TERMINAL_INTER_BUF_LEN:usize = 10;
+#[derive(Clone)]
 pub struct Terminal{
     ttype:TerminalType
 }
@@ -503,6 +505,31 @@ impl DFile {
     }
     pub fn writeable(&self)->bool{
         self.inner.lock_irq().unwrap().writeable()
+    }
+    pub fn deep_clone(&self)->Self{
+        let inner = self.inner.lock_irq().unwrap();
+        let new_class =  match &inner.class {
+            DFileClass::ClassInode(inode) => {
+                DFileClass::ClassInode(inode.clone())
+            }
+            DFileClass::ClassTerminal(terminal) => {
+                DFileClass::ClassTerminal(terminal.clone())
+            }
+            ClassPipe(pipe) => {
+                if inner.writeable(){
+                    pipe.inc_write();
+                }
+                DFileClass::ClassPipe(pipe.clone())
+            }
+        };
+        Self{
+            inner: SpinLock::new(DFileMutInner{
+                class: new_class,
+                pos: inner.pos,
+                open_flags: inner.open_flags,
+                cloexec: inner.cloexec
+            })
+        }
     }
 }
 

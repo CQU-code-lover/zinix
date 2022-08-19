@@ -279,6 +279,14 @@ impl Add<usize> for Vaddr {
 
     fn add(self, rhs: usize) -> Self::Output {
         Self(self.0 + rhs)
+        // Self(match self.0.checked_add(rhs){
+        //     None => {
+        //         panic!("pp");
+        //     }
+        //     Some(s) => {
+        //         s
+        //     }
+        // })
     }
 }
 
