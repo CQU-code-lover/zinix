@@ -104,7 +104,8 @@ fn sys_execve(path:usize, mut argv_ptr:usize, envp_ptr:usize, tf: &mut TrapFrame
     let old_sp = tf.x2;
     unsafe { *tf = (*(tff as *const TrapFrame)).clone() }
     tf.x2 = old_sp;
-
+    tf.sepc-=4;
+    // 因为syscall返回sepc会+4
     unsafe { this_tsk.install_pagetable(); }
     unsafe { fence_i(); }
     0

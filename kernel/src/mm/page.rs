@@ -124,7 +124,7 @@ impl PagesManager {
             vaddr_probe+=PAGE_SIZE;
         }
         trace_sync!("Alloc Page Vaddr={:#X},order={}",ret.get_vaddr().0,order);
-        trace_global_buddy();
+        // trace_global_buddy();
         ret
     }
     pub fn get_in_memory_page(&self, vaddr:Vaddr) ->Option<Arc<Page>>{

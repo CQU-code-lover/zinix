@@ -107,7 +107,7 @@ impl PageTable {
             let entry =unsafe {get_usize_by_addr(entry_addr)};
             let mut pte = PTE::from(entry);
             // 如果是leaf，不管pte是否valid都能返回
-            trace_sync!("pte:flags={:#b},point-addr={:#X}",pte.flags,pte.get_point_paddr());
+            // trace_sync!("pte:flags={:#b},point-addr={:#X}",pte.flags,pte.get_point_paddr());
             // is_leaf可以判断大页的leaf
             if pte.is_leaf(){
                 return Some(WalkRet{

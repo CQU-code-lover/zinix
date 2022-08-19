@@ -151,9 +151,6 @@ pub fn alloc_pages(order:usize)->Option<Arc<Page>>{
         Ok(vaddr) => {
             let pgs = PAGES_MANAGER.lock().unwrap().new_pages_block_in_memory(vaddr, order);
             pgs.clear_pages_block();
-            if pgs.get_paddr().get_inner() == 0x87FAF000{
-                println!("1");
-            }
             Some(pgs)
         }
         _ => {

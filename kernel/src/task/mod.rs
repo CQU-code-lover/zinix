@@ -65,6 +65,7 @@ pub fn exit_self(exit_code:i32){
     tsk.exit_code = exit_code;
     tsk.set_status(TaskZombie);
     wake_up_all_sleeping();
+    drop(tsk);
     scheduler(None);
 }
 

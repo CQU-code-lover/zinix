@@ -6,13 +6,12 @@ use core::arch::{asm, global_asm};
 use core::arch::riscv64::{fence_i, sfence_vma_all, sfence_vma_vaddr};
 use core::fmt::{Debug, Formatter};
 use core::mem::size_of;
-use fatfs::Write;
 use log::debug;
 use riscv::register::{sie, sstatus, stvec, scause};
 use riscv::register::scause::{Exception, Interrupt, Scause, Trap};
 use riscv::register::sstatus::Sstatus;
 use riscv::register::stvec::TrapMode;
-use crate::{debug_sync, info_sync, println, r_sstatus, trace_sync, warn_sync};
+use crate::{debug_sync, info_sync, print, println, r_sstatus, trace_sync, warn_sync};
 use crate::asm::{disable_irq, enable_irq, r_satp, r_scause, r_stval, SSTATUS_SPP};
 use crate::consts::PHY_MEM_OFFSET;
 use crate::mm::{alloc_one_page, get_kernel_mm, get_kernel_pagetable};
@@ -232,6 +231,7 @@ fn exc_handler(trap_frame:&mut TrapFrame){
                         }
                         let vaddr = r_stval();
                         trap_page_fault_handler(Vaddr(vaddr),PgFaultProt::EXEC);
+                        fence_i();
                         // unsafe {
                         //     // get_running().lock().unwrap().install_pagetable();
                         //     let v = *(trap_frame.sepc as *const usize);
